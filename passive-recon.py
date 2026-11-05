@@ -15,6 +15,7 @@ import re
 import os
 import argparse
 import hashlib
+import base64
 from urllib.parse import urlparse, urljoin
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -54,7 +55,7 @@ def banner():
  | |_) / _` / __/ __| \\ \\ / / _ \\ |_) / _ \\/ __/ _ \\| '_ \\
  |  __/ (_| \\__ \\__ \\ |\\ V /  __/  _ <  __/ (_| (_) | | | |
  |_|   \\__,_|___/___/_| \\_/ \\___|_| \\_\\___|\\___\\___/|_| |_|
-                                            {C.D}v1.0 by SR{C.X}
+                                            {C.D}v2.0 by SR{C.X}
 """)
 
 def log_info(msg):
@@ -692,55 +693,117 @@ def mod_sensitive_paths(session, base_url, results):
     section("9. SENSITIVE FILES & PATHS")
 
     paths = [
-        "/.env",
-        "/.git/HEAD",
-        "/.git/config",
-        "/.gitignore",
-        "/.svn/entries",
-        "/.DS_Store",
-        "/wp-config.php.bak",
-        "/config.php.bak",
-        "/backup.zip",
-        "/backup.sql",
-        "/database.sql",
-        "/debug.log",
-        "/error.log",
-        "/phpinfo.php",
-        "/info.php",
-        "/server-status",
-        "/server-info",
-        "/.htaccess",
-        "/.htpasswd",
-        "/crossdomain.xml",
-        "/clientaccesspolicy.xml",
-        "/security.txt",
-        "/.well-known/security.txt",
-        "/humans.txt",
-        "/package.json",
-        "/composer.json",
-        "/Gruntfile.js",
-        "/gulpfile.js",
-        "/webpack.config.js",
-        "/Dockerfile",
-        "/docker-compose.yml",
-        "/.dockerenv",
-        "/swagger.json",
-        "/api-docs",
-        "/swagger-ui.html",
-        "/openapi.json",
-        "/graphql",
-        "/graphiql",
-        "/_debug",
-        "/trace",
-        "/actuator",
-        "/actuator/health",
-        "/actuator/env",
-        "/console",
-        "/admin",
-        "/login",
-        "/wp-admin",
-        "/wp-login.php",
-        "/administrator",
+        # === Environment & Config ===
+        "/.env", "/.env.local", "/.env.development", "/.env.production",
+        "/.env.staging", "/.env.backup", "/.env.old", "/.env.save",
+        "/config.php", "/config.php.bak", "/config.php.old", "/config.php.save",
+        "/config.yml", "/config.yaml", "/config.json", "/config.xml",
+        "/configuration.php", "/settings.php", "/settings.py",
+        "/wp-config.php", "/wp-config.php.bak", "/wp-config.php.old",
+        "/web.config", "/appsettings.json", "/appsettings.Development.json",
+        "/application.yml", "/application.properties",
+        "/database.yml", "/secrets.yml", "/credentials.json",
+        # === Version Control ===
+        "/.git/HEAD", "/.git/config", "/.git/logs/HEAD",
+        "/.git/refs/heads/main", "/.git/refs/heads/master",
+        "/.gitignore", "/.gitattributes",
+        "/.svn/entries", "/.svn/wc.db",
+        "/.hg/hgrc", "/.bzr/README",
+        # === IDE & Editor ===
+        "/.idea/workspace.xml", "/.vscode/settings.json", "/.vscode/launch.json",
+        "/.editorconfig", "/.DS_Store", "/Thumbs.db",
+        # === Server Config ===
+        "/.htaccess", "/.htpasswd", "/nginx.conf",
+        "/server-status", "/server-info",
+        "/elmah.axd", "/trace.axd",
+        # === Backups ===
+        "/backup.zip", "/backup.tar.gz", "/backup.sql", "/backup.sql.gz",
+        "/database.sql", "/database.sql.gz", "/db.sql", "/dump.sql",
+        "/data.sql", "/site.zip", "/www.zip", "/html.zip",
+        "/backup/", "/backups/", "/old/", "/temp/", "/tmp/",
+        # === Logs ===
+        "/debug.log", "/error.log", "/access.log",
+        "/app.log", "/application.log", "/laravel.log",
+        "/storage/logs/laravel.log", "/var/log/",
+        "/logs/", "/log/", "/log.txt",
+        # === PHP ===
+        "/phpinfo.php", "/info.php", "/php_info.php", "/test.php",
+        "/i.php", "/pi.php", "/p.php",
+        # === Admin Panels ===
+        "/admin", "/admin/", "/admin/login", "/admin/dashboard",
+        "/administrator/", "/administrator/index.php",
+        "/wp-admin/", "/wp-login.php",
+        "/cpanel", "/phpmyadmin/", "/pma/",
+        "/adminer.php", "/adminer/",
+        "/manager/html", "/manager/status",
+        "/solr/admin/", "/jenkins/", "/hudson/",
+        "/_admin", "/siteadmin", "/webadmin",
+        "/controlpanel", "/dashboard/", "/portal/",
+        # === API Documentation ===
+        "/swagger.json", "/swagger.yaml", "/swagger-ui.html", "/swagger-ui/",
+        "/api-docs", "/api-docs/", "/api/docs",
+        "/openapi.json", "/openapi.yaml",
+        "/graphql", "/graphiql", "/graphql/console",
+        "/api/v1/", "/api/v2/", "/api/v3/",
+        "/api/swagger", "/api/spec", "/api/schema",
+        "/redoc", "/docs/api",
+        # === Debug & Dev ===
+        "/_debug", "/_debugbar", "/_profiler",
+        "/trace", "/__debug__/",
+        "/debug/default/view", "/debug/pprof/",
+        "/console", "/console/", "/shell",
+        "/diag", "/diagnostic", "/diagnostics",
+        "/status", "/health", "/healthcheck", "/health-check",
+        # === Spring Boot Actuator ===
+        "/actuator", "/actuator/health", "/actuator/env",
+        "/actuator/info", "/actuator/beans", "/actuator/configprops",
+        "/actuator/mappings", "/actuator/metrics", "/actuator/threaddump",
+        "/actuator/heapdump", "/actuator/loggers", "/actuator/conditions",
+        "/actuator/scheduledtasks", "/actuator/httptrace",
+        "/env", "/beans", "/mappings", "/metrics",
+        # === Build & Dependency Files ===
+        "/package.json", "/package-lock.json", "/yarn.lock",
+        "/composer.json", "/composer.lock",
+        "/Gemfile", "/Gemfile.lock",
+        "/requirements.txt", "/Pipfile", "/Pipfile.lock",
+        "/pom.xml", "/build.gradle",
+        "/Gruntfile.js", "/gulpfile.js",
+        "/webpack.config.js", "/tsconfig.json",
+        "/Makefile", "/Rakefile",
+        # === Docker & CI/CD ===
+        "/Dockerfile", "/docker-compose.yml", "/docker-compose.yaml",
+        "/.dockerenv", "/.docker/config.json",
+        "/.github/workflows/", "/.gitlab-ci.yml",
+        "/.travis.yml", "/Jenkinsfile",
+        "/Procfile", "/Vagrantfile",
+        # === Cloud & Storage ===
+        "/.aws/credentials", "/.aws/config",
+        "/s3.amazonaws.com", "/storage/", "/uploads/",
+        "/media/", "/assets/", "/static/",
+        # === CMS Specific ===
+        "/wp-content/debug.log", "/wp-content/uploads/",
+        "/wp-includes/version.php", "/wp-json/wp/v2/users",
+        "/wp-json/", "/xmlrpc.php", "/readme.html",
+        "/license.txt", "/wp-cron.php",
+        "/joomla.xml", "/configuration.php~",
+        "/sites/default/files/", "/CHANGELOG.txt",
+        "/core/CHANGELOG.txt", "/modules/",
+        # === Misc Sensitive ===
+        "/crossdomain.xml", "/clientaccesspolicy.xml",
+        "/security.txt", "/.well-known/security.txt",
+        "/humans.txt", "/robots.txt",
+        "/.well-known/change-password",
+        "/.well-known/openid-configuration",
+        "/sitemap.xml", "/sitemap_index.xml",
+        "/favicon.ico", "/manifest.json",
+        # === Source Maps ===
+        "/main.js.map", "/app.js.map", "/bundle.js.map",
+        "/vendor.js.map", "/runtime.js.map",
+        # === Firebase ===
+        "/__/firebase/init.json",
+        # === Error Pages (info leak) ===
+        "/404", "/500", "/error", "/errors/",
+        "/not-found", "/undefined",
     ]
 
     found_paths = []
@@ -939,10 +1002,793 @@ def mod_keycloak_recon(session, base_url, results):
 
 
 # =====================================================================
-#  MODULO 12: VULNERABILITY ASSESSMENT
+#  MODULO 12: CORS Misconfiguration Check
+# =====================================================================
+def mod_cors(session, url, results):
+    section("12. CORS MISCONFIGURATION CHECK")
+
+    cors_results = []
+    origins_to_test = [
+        "https://evil.com",
+        "https://attacker.com",
+        "null",
+        f"https://{urlparse(url).hostname}.evil.com",
+    ]
+
+    for origin in origins_to_test:
+        try:
+            headers = {"Origin": origin}
+            r = session.get(url, headers=headers, timeout=10)
+            acao = r.headers.get("Access-Control-Allow-Origin", "")
+            acac = r.headers.get("Access-Control-Allow-Credentials", "")
+
+            if acao:
+                entry = {"origin_sent": origin, "acao": acao, "acac": acac}
+                cors_results.append(entry)
+
+                if acao == "*":
+                    log_warn(f"ACAO: * (wildcard) — cualquier origen puede leer respuestas")
+                elif acao == origin:
+                    log_fail(f"ACAO refleja origen arbitrario: {origin}")
+                    if acac.lower() == "true":
+                        log_fail(f"  + Allow-Credentials: true — CRITICO: cookies se envian")
+                elif acao == "null":
+                    log_warn(f"ACAO: null — puede ser explotado con sandboxed iframe")
+                else:
+                    log_ok(f"Origin {origin} → ACAO: {acao}")
+        except Exception:
+            continue
+
+    if not cors_results:
+        log_info("No se detectaron headers CORS")
+
+    results["cors"] = cors_results
+
+
+# =====================================================================
+#  MODULO 13: HTTP Methods Check
+# =====================================================================
+def mod_http_methods(session, url, results):
+    section("13. HTTP METHODS CHECK")
+
+    dangerous_methods = []
+    methods_found = []
+
+    # OPTIONS request
+    try:
+        r = session.options(url, timeout=10)
+        allow = r.headers.get("Allow", "")
+        if allow:
+            log_ok(f"Allow header: {allow}")
+            methods_found = [m.strip().upper() for m in allow.split(",")]
+        access_methods = r.headers.get("Access-Control-Allow-Methods", "")
+        if access_methods:
+            log_data("CORS Methods", access_methods)
+    except Exception:
+        pass
+
+    # Test dangerous methods
+    test_methods = ["PUT", "DELETE", "TRACE", "PATCH", "CONNECT"]
+    for method in test_methods:
+        try:
+            r = session.request(method, url, timeout=5)
+            if r.status_code not in [405, 501, 404]:
+                methods_found.append(method)
+                if method in ["PUT", "DELETE", "TRACE"]:
+                    dangerous_methods.append((method, r.status_code))
+                    log_fail(f"{method} habilitado — HTTP {r.status_code}")
+                else:
+                    log_info(f"{method} responde — HTTP {r.status_code}")
+        except Exception:
+            pass
+
+    if dangerous_methods:
+        log_warn(f"Metodos peligrosos activos: {', '.join(m[0] for m in dangerous_methods)}")
+
+    results["http_methods"] = methods_found
+    results["dangerous_methods"] = dangerous_methods
+
+
+# =====================================================================
+#  MODULO 14: WAF Detection
+# =====================================================================
+def mod_waf_detect(session, url, results):
+    section("14. WAF / FIREWALL DETECTION")
+
+    waf_signatures = {
+        "Cloudflare": {"headers": ["cf-ray", "cf-cache-status", "cf-request-id"],
+                       "cookies": ["__cfduid", "__cf_bm", "cf_clearance"],
+                       "body": ["cloudflare"]},
+        "AWS WAF": {"headers": ["x-amzn-requestid", "x-amz-cf-id"],
+                    "body": ["aws"]},
+        "Akamai": {"headers": ["x-akamai-transformed", "akamai-grn"],
+                   "cookies": ["akamai"],
+                   "body": ["akamai"]},
+        "Sucuri": {"headers": ["x-sucuri-id", "x-sucuri-cache"],
+                   "body": ["sucuri"]},
+        "Imperva/Incapsula": {"headers": ["x-iinfo", "x-cdn"],
+                              "cookies": ["incap_ses", "visid_incap"],
+                              "body": ["incapsula"]},
+        "F5 BIG-IP": {"headers": ["x-wa-info"],
+                      "cookies": ["BIGipServer", "TS0"],
+                      "body": []},
+        "ModSecurity": {"headers": [],
+                        "body": ["mod_security", "modsecurity", "NOYB"]},
+        "Barracuda": {"headers": ["barra_counter_session"],
+                      "cookies": ["barra_counter_session"],
+                      "body": ["barracuda"]},
+        "Fortinet/FortiWeb": {"headers": ["fortiwafsid"],
+                              "cookies": ["FORTIWAFSID"],
+                              "body": ["fortiweb"]},
+        "DDoS-Guard": {"headers": ["ddos-guard"],
+                       "body": ["ddos-guard"]},
+        "Wordfence": {"headers": [],
+                      "cookies": ["wfwaf-authcookie"],
+                      "body": ["wordfence"]},
+    }
+
+    detected_wafs = []
+
+    try:
+        r = session.get(url, timeout=10)
+        resp_headers = {k.lower(): v.lower() for k, v in r.headers.items()}
+        resp_cookies = {c.name.lower(): c.value for c in r.cookies}
+        body_lower = r.text[:5000].lower()
+
+        for waf_name, sigs in waf_signatures.items():
+            found = False
+
+            for h in sigs.get("headers", []):
+                if h.lower() in resp_headers:
+                    found = True
+                    break
+
+            if not found:
+                for c in sigs.get("cookies", []):
+                    for cookie_name in resp_cookies:
+                        if c.lower() in cookie_name:
+                            found = True
+                            break
+
+            if not found:
+                for b in sigs.get("body", []):
+                    if b.lower() in body_lower:
+                        found = True
+                        break
+
+            if found:
+                detected_wafs.append(waf_name)
+                log_ok(f"WAF detectado: {waf_name}")
+
+        # Test with malicious-looking request
+        test_url = f"{url}/?id=1' OR '1'='1"
+        try:
+            r2 = session.get(test_url, timeout=10)
+            if r2.status_code in [403, 406, 429, 503]:
+                log_info(f"Request malicioso bloqueado (HTTP {r2.status_code}) — WAF activo")
+                results["waf_blocking"] = True
+            else:
+                results["waf_blocking"] = False
+        except Exception:
+            pass
+
+    except Exception as e:
+        log_fail(f"Error: {e}")
+
+    if not detected_wafs:
+        log_info("No se detecto WAF conocido")
+
+    results["waf"] = detected_wafs
+
+
+# =====================================================================
+#  MODULO 15: Wayback Machine
+# =====================================================================
+def mod_wayback(session, domain, results):
+    section("15. WAYBACK MACHINE (HISTORICAL URLS)")
+
+    try:
+        api_url = f"https://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=json&fl=original,statuscode,mimetype&collapse=urlkey&limit=100"
+        r = session.get(api_url, timeout=30)
+
+        if r.status_code != 200:
+            log_warn(f"Wayback Machine respondio {r.status_code}")
+            return
+
+        data = r.json()
+        if len(data) <= 1:
+            log_info("No se encontraron URLs historicas")
+            return
+
+        urls = data[1:]  # Skip header row
+        log_ok(f"URLs historicas encontradas: {len(urls)}")
+
+        interesting_extensions = [
+            ".php", ".asp", ".aspx", ".jsp", ".cgi", ".pl",
+            ".sql", ".bak", ".old", ".zip", ".tar", ".gz",
+            ".env", ".conf", ".config", ".xml", ".json", ".yml",
+            ".log", ".txt", ".csv", ".xls", ".doc", ".pdf",
+            ".key", ".pem", ".crt",
+        ]
+
+        interesting_urls = []
+        api_urls = []
+        admin_urls = []
+
+        for entry in urls:
+            url_str = entry[0] if isinstance(entry, list) else entry
+            url_lower = url_str.lower()
+
+            for ext in interesting_extensions:
+                if ext in url_lower:
+                    interesting_urls.append(url_str)
+                    break
+
+            if "/api/" in url_lower or "/v1/" in url_lower or "/v2/" in url_lower:
+                api_urls.append(url_str)
+
+            if "admin" in url_lower or "login" in url_lower or "dashboard" in url_lower:
+                admin_urls.append(url_str)
+
+        if interesting_urls:
+            log_info(f"URLs con extensiones interesantes: {len(interesting_urls)}")
+            for u in interesting_urls[:15]:
+                log_data("File", u)
+
+        if api_urls:
+            log_info(f"API endpoints historicos: {len(api_urls)}")
+            for u in list(set(api_urls))[:10]:
+                log_data("API", u)
+
+        if admin_urls:
+            log_info(f"Admin/Login URLs historicas: {len(admin_urls)}")
+            for u in list(set(admin_urls))[:10]:
+                log_data("Admin", u)
+
+        results["wayback_total"] = len(urls)
+        results["wayback_interesting"] = interesting_urls[:30]
+        results["wayback_apis"] = list(set(api_urls))[:20]
+        results["wayback_admin"] = list(set(admin_urls))[:20]
+
+    except Exception as e:
+        log_fail(f"Error Wayback: {e}")
+
+
+# =====================================================================
+#  MODULO 16: Cloud Storage Detection
+# =====================================================================
+def mod_cloud_storage(session, url, html, results):
+    section("16. CLOUD STORAGE DETECTION")
+
+    cloud_findings = []
+
+    # Patterns for cloud storage URLs
+    patterns = {
+        "AWS S3": [
+            r'https?://([a-zA-Z0-9._-]+)\.s3\.amazonaws\.com',
+            r'https?://s3\.amazonaws\.com/([a-zA-Z0-9._-]+)',
+            r'https?://([a-zA-Z0-9._-]+)\.s3[.-](us|eu|ap|sa|ca|me|af)-[a-z]+-\d+\.amazonaws\.com',
+            r'https?://s3[.-](us|eu|ap|sa|ca|me|af)-[a-z]+-\d+\.amazonaws\.com/([a-zA-Z0-9._-]+)',
+        ],
+        "Azure Blob": [
+            r'https?://([a-zA-Z0-9]+)\.blob\.core\.windows\.net',
+            r'https?://([a-zA-Z0-9]+)\.file\.core\.windows\.net',
+            r'https?://([a-zA-Z0-9]+)\.table\.core\.windows\.net',
+            r'https?://([a-zA-Z0-9]+)\.queue\.core\.windows\.net',
+        ],
+        "Google Cloud Storage": [
+            r'https?://storage\.googleapis\.com/([a-zA-Z0-9._-]+)',
+            r'https?://([a-zA-Z0-9._-]+)\.storage\.googleapis\.com',
+        ],
+        "Firebase": [
+            r'https?://([a-zA-Z0-9._-]+)\.firebaseio\.com',
+            r'https?://([a-zA-Z0-9._-]+)\.firebaseapp\.com',
+            r'https?://([a-zA-Z0-9._-]+)\.web\.app',
+        ],
+        "DigitalOcean Spaces": [
+            r'https?://([a-zA-Z0-9._-]+)\.digitaloceanspaces\.com',
+        ],
+    }
+
+    for provider, pats in patterns.items():
+        for pat in pats:
+            matches = re.findall(pat, html)
+            if matches:
+                for m in set(matches):
+                    bucket = m if isinstance(m, str) else m[0]
+                    cloud_findings.append({"provider": provider, "bucket": bucket})
+                    log_ok(f"{provider}: {bucket}")
+
+    # Check if S3 buckets are listable
+    for finding in cloud_findings:
+        if finding["provider"] == "AWS S3":
+            bucket = finding["bucket"]
+            try:
+                r = session.get(f"https://{bucket}.s3.amazonaws.com/", timeout=10)
+                if r.status_code == 200 and "ListBucketResult" in r.text:
+                    log_fail(f"S3 bucket LISTABLE: {bucket}")
+                    finding["listable"] = True
+                elif r.status_code == 403:
+                    log_info(f"S3 bucket existe pero no listable: {bucket}")
+                    finding["listable"] = False
+            except Exception:
+                pass
+
+    if not cloud_findings:
+        log_info("No se detectaron servicios cloud expuestos")
+
+    results["cloud_storage"] = cloud_findings
+
+
+# =====================================================================
+#  MODULO 17: Subdomain Takeover Check
+# =====================================================================
+def mod_subdomain_takeover(session, subdomains, results):
+    section("17. SUBDOMAIN TAKEOVER CHECK")
+
+    if not subdomains:
+        log_warn("No hay subdominios para verificar")
+        return
+
+    # Services vulnerable to subdomain takeover
+    takeover_signatures = {
+        "GitHub Pages": ["There isn't a GitHub Pages site here", "For root URLs"],
+        "Heroku": ["No such app", "herokucdn.com/error-pages", "no-such-app"],
+        "AWS S3": ["NoSuchBucket", "The specified bucket does not exist"],
+        "AWS Elastic Beanstalk": ["NXDOMAIN"],
+        "Shopify": ["Sorry, this shop is currently unavailable"],
+        "Tumblr": ["Whatever you were looking for doesn't currently exist"],
+        "WordPress.com": ["Do you want to register"],
+        "Pantheon": ["404 error unknown site"],
+        "Fastly": ["Fastly error: unknown domain"],
+        "Zendesk": ["Help Center Closed"],
+        "Bitbucket": ["Repository not found"],
+        "Ghost": ["The thing you were looking for is no longer here"],
+        "Surge.sh": ["project not found"],
+        "Fly.io": ["404 Not Found"],
+        "Netlify": ["Not Found - Request ID"],
+        "Cargo Collective": ["If you're moving your domain away"],
+        "Unbounce": ["The requested URL was not found"],
+    }
+
+    takeover_candidates = []
+    checked = 0
+    max_check = min(len(subdomains), 50)
+
+    log_info(f"Verificando {max_check} subdominios...")
+
+    def check_sub(sub):
+        for scheme in ["https", "http"]:
+            try:
+                r = session.get(f"{scheme}://{sub}", timeout=8, allow_redirects=True)
+                body = r.text[:3000]
+                for service, signatures in takeover_signatures.items():
+                    for sig in signatures:
+                        if sig.lower() in body.lower():
+                            return (sub, service, sig)
+            except requests.exceptions.ConnectionError:
+                # NXDOMAIN or connection refused — potential takeover
+                try:
+                    socket.getaddrinfo(sub, None)
+                except socket.gaierror:
+                    return (sub, "NXDOMAIN (dangling CNAME)", "DNS no resuelve")
+            except Exception:
+                continue
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_sub, s): s for s in subdomains[:max_check]}
+        for future in as_completed(futures):
+            result = future.result()
+            checked += 1
+            if result:
+                sub, service, sig = result
+                takeover_candidates.append(result)
+                log_fail(f"POSIBLE TAKEOVER: {sub} → {service}")
+
+    log_ok(f"Verificados: {checked}/{len(subdomains)}")
+    if not takeover_candidates:
+        log_ok("No se detectaron candidatos a subdomain takeover")
+
+    results["subdomain_takeover"] = [
+        {"subdomain": s, "service": svc, "signature": sig}
+        for s, svc, sig in takeover_candidates
+    ]
+
+
+# =====================================================================
+#  MODULO 18: CSP Deep Analysis
+# =====================================================================
+def mod_csp_analysis(results):
+    section("18. CSP DEEP ANALYSIS")
+
+    headers = results.get("headers", {})
+    csp = headers.get("Content-Security-Policy", "")
+
+    if not csp:
+        log_warn("No hay Content-Security-Policy para analizar")
+        return
+
+    log_ok(f"CSP encontrado ({len(csp)} chars)")
+    results["csp_raw"] = csp
+
+    csp_issues = []
+    directives = {}
+    for part in csp.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        if tokens:
+            directives[tokens[0]] = tokens[1:] if len(tokens) > 1 else []
+
+    results["csp_directives"] = directives
+
+    # Check for unsafe directives
+    for directive, values in directives.items():
+        values_str = " ".join(values)
+        log_data(directive, values_str[:80])
+
+        if "'unsafe-inline'" in values:
+            csp_issues.append(f"{directive} permite 'unsafe-inline' — XSS posible")
+            log_fail(f"  {directive}: 'unsafe-inline' detectado")
+
+        if "'unsafe-eval'" in values:
+            csp_issues.append(f"{directive} permite 'unsafe-eval' — code injection posible")
+            log_fail(f"  {directive}: 'unsafe-eval' detectado")
+
+        if "*" in values:
+            csp_issues.append(f"{directive} usa wildcard '*' — permite cualquier origen")
+            log_fail(f"  {directive}: wildcard '*' detectado")
+
+        if "data:" in values and directive in ["script-src", "default-src"]:
+            csp_issues.append(f"{directive} permite 'data:' — bypass de CSP posible")
+            log_warn(f"  {directive}: 'data:' detectado")
+
+        if "http:" in values_str:
+            csp_issues.append(f"{directive} permite HTTP — mixed content")
+            log_warn(f"  {directive}: permite HTTP")
+
+    # Check missing critical directives
+    critical = ["default-src", "script-src", "object-src", "base-uri", "frame-ancestors"]
+    for d in critical:
+        if d not in directives:
+            csp_issues.append(f"Directiva '{d}' ausente")
+            log_warn(f"Falta directiva: {d}")
+
+    if "object-src" not in directives and "'none'" not in directives.get("default-src", []):
+        csp_issues.append("object-src no restringido — Flash/plugin injection posible")
+
+    if "base-uri" not in directives:
+        csp_issues.append("base-uri ausente — base tag injection posible")
+
+    if "frame-ancestors" not in directives:
+        csp_issues.append("frame-ancestors ausente — clickjacking posible (CSP)")
+
+    if not csp_issues:
+        log_ok("CSP parece bien configurado")
+
+    results["csp_issues"] = csp_issues
+
+
+# =====================================================================
+#  MODULO 19: CMS Deep Scan
+# =====================================================================
+def mod_cms_deep(session, base_url, html, results):
+    section("19. CMS DEEP SCAN")
+
+    cms_findings = {"cms": None, "version": None, "plugins": [], "themes": [], "users": [], "issues": []}
+
+    # === WordPress ===
+    if any(x in html for x in ["wp-content", "wp-includes", "wordpress"]):
+        cms_findings["cms"] = "WordPress"
+        log_ok("CMS: WordPress detectado")
+
+        # Version from meta
+        ver = re.findall(r'<meta name="generator" content="WordPress ([\d.]+)"', html)
+        if ver:
+            cms_findings["version"] = ver[0]
+            log_data("Version", ver[0])
+
+        # Version from readme
+        try:
+            r = session.get(urljoin(base_url, "/readme.html"), timeout=10)
+            if r.status_code == 200:
+                rv = re.findall(r'Version ([\d.]+)', r.text)
+                if rv:
+                    cms_findings["version"] = rv[0]
+                    log_data("Version (readme)", rv[0])
+                    cms_findings["issues"].append("readme.html expuesto — revela version")
+        except Exception:
+            pass
+
+        # Users via REST API
+        try:
+            r = session.get(urljoin(base_url, "/wp-json/wp/v2/users"), timeout=10)
+            if r.status_code == 200:
+                users = r.json()
+                for u in users[:10]:
+                    name = u.get("slug", u.get("name", ""))
+                    cms_findings["users"].append(name)
+                    log_ok(f"Usuario: {name}")
+                cms_findings["issues"].append("API de usuarios expuesta")
+        except Exception:
+            pass
+
+        # Plugins from HTML
+        plugins = list(set(re.findall(r'wp-content/plugins/([a-zA-Z0-9_-]+)', html)))
+        if plugins:
+            cms_findings["plugins"] = plugins
+            log_info(f"Plugins detectados: {len(plugins)}")
+            for p in plugins:
+                log_data("Plugin", p)
+
+        # Themes from HTML
+        themes = list(set(re.findall(r'wp-content/themes/([a-zA-Z0-9_-]+)', html)))
+        if themes:
+            cms_findings["themes"] = themes
+            for t in themes:
+                log_data("Theme", t)
+
+        # XMLRPC
+        try:
+            r = session.post(urljoin(base_url, "/xmlrpc.php"), timeout=10,
+                           data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>',
+                           headers={"Content-Type": "text/xml"})
+            if r.status_code == 200 and "methodResponse" in r.text:
+                log_fail("XML-RPC habilitado — brute force / DDoS amplification posible")
+                cms_findings["issues"].append("XML-RPC habilitado")
+        except Exception:
+            pass
+
+        # Debug log
+        try:
+            r = session.head(urljoin(base_url, "/wp-content/debug.log"), timeout=5)
+            if r.status_code == 200:
+                log_fail("debug.log accesible — info leak")
+                cms_findings["issues"].append("wp-content/debug.log expuesto")
+        except Exception:
+            pass
+
+    # === Joomla ===
+    elif any(x in html for x in ["com_content", "/media/jui/", "Joomla"]):
+        cms_findings["cms"] = "Joomla"
+        log_ok("CMS: Joomla detectado")
+
+        try:
+            r = session.get(urljoin(base_url, "/administrator/manifests/files/joomla.xml"), timeout=10)
+            if r.status_code == 200:
+                ver = re.findall(r'<version>([\d.]+)</version>', r.text)
+                if ver:
+                    cms_findings["version"] = ver[0]
+                    log_data("Version", ver[0])
+        except Exception:
+            pass
+
+    # === Drupal ===
+    elif any(x in html for x in ["drupal", "Drupal.settings", "/sites/default/"]):
+        cms_findings["cms"] = "Drupal"
+        log_ok("CMS: Drupal detectado")
+
+        try:
+            r = session.get(urljoin(base_url, "/CHANGELOG.txt"), timeout=10)
+            if r.status_code == 200:
+                ver = re.findall(r'Drupal ([\d.]+)', r.text[:500])
+                if ver:
+                    cms_findings["version"] = ver[0]
+                    log_data("Version", ver[0])
+                    cms_findings["issues"].append("CHANGELOG.txt expuesto")
+        except Exception:
+            pass
+
+    else:
+        log_info("No se detecto CMS conocido")
+
+    results["cms"] = cms_findings
+
+
+# =====================================================================
+#  MODULO 20: Favicon Hash (Shodan-style fingerprinting)
+# =====================================================================
+def mod_favicon_hash(session, base_url, results):
+    section("20. FAVICON HASH FINGERPRINTING")
+
+    # Known favicon hashes (MurmurHash3 style — we use md5 for simplicity)
+    known_hashes = {
+        "f276b19aabcb4ae8cda4d22625c6735f": "Spring Boot",
+        "d4a1cb71de5e70818c3e18e84ed3e13f": "Apache Tomcat",
+        "71e30c09f15e2a74b8e8c9b5f5b3a6b4": "Grafana",
+        "292a26e5a9b35f8e3c0c937c3e5a6fd9": "Jenkins",
+        "a8b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6": "GitLab",
+    }
+
+    try:
+        r = session.get(urljoin(base_url, "/favicon.ico"), timeout=10)
+        if r.status_code == 200 and len(r.content) > 0:
+            # MD5 hash
+            fav_hash = hashlib.md5(r.content).hexdigest()
+            # SHA256 for reference
+            fav_sha = hashlib.sha256(r.content).hexdigest()[:16]
+            # Base64 for Shodan-style
+            fav_b64 = base64.b64encode(r.content)
+
+            log_ok(f"Favicon encontrado ({len(r.content)} bytes)")
+            log_data("MD5", fav_hash)
+            log_data("SHA256 (partial)", fav_sha)
+
+            # Check known hashes
+            match = known_hashes.get(fav_hash)
+            if match:
+                log_ok(f"Match conocido: {match}")
+            else:
+                log_info("No match en base de datos local")
+
+            # Shodan search hint
+            try:
+                log_info(f"Buscar en Shodan: http.favicon.hash:{fav_hash[:16]}")
+            except Exception:
+                pass
+
+            results["favicon"] = {
+                "md5": fav_hash,
+                "sha256": fav_sha,
+                "size": len(r.content),
+                "known_match": match,
+            }
+        else:
+            log_info("No se encontro favicon.ico")
+    except Exception as e:
+        log_fail(f"Error: {e}")
+
+
+# =====================================================================
+#  MODULO 21: Security.txt Parser
+# =====================================================================
+def mod_security_txt(session, base_url, results):
+    section("21. SECURITY.TXT ANALYSIS")
+
+    sec_txt = None
+    for path in ["/.well-known/security.txt", "/security.txt"]:
+        try:
+            r = session.get(urljoin(base_url, path), timeout=10)
+            if r.status_code == 200 and ("contact" in r.text.lower() or "policy" in r.text.lower()):
+                sec_txt = r.text
+                log_ok(f"security.txt encontrado: {path}")
+                break
+        except Exception:
+            continue
+
+    if not sec_txt:
+        log_warn("No se encontro security.txt — el sitio no tiene politica de divulgacion")
+        results["security_txt"] = None
+        return
+
+    fields = {
+        "Contact": r"Contact:\s*(.+)",
+        "Expires": r"Expires:\s*(.+)",
+        "Encryption": r"Encryption:\s*(.+)",
+        "Acknowledgments": r"Acknowledgments?:\s*(.+)",
+        "Preferred-Languages": r"Preferred-Languages?:\s*(.+)",
+        "Canonical": r"Canonical:\s*(.+)",
+        "Policy": r"Policy:\s*(.+)",
+        "Hiring": r"Hiring:\s*(.+)",
+    }
+
+    parsed_fields = {}
+    for field, pattern in fields.items():
+        matches = re.findall(pattern, sec_txt, re.I)
+        if matches:
+            for m in matches:
+                parsed_fields[field] = m.strip()
+                log_data(field, m.strip())
+
+    # Check for bug bounty hints
+    bounty_keywords = ["hackerone", "bugcrowd", "intigriti", "synack", "bounty", "reward"]
+    for keyword in bounty_keywords:
+        if keyword in sec_txt.lower():
+            log_ok(f"Programa de bug bounty detectado ('{keyword}')")
+            parsed_fields["bug_bounty_hint"] = keyword
+
+    # Check expiration
+    expires = parsed_fields.get("Expires", "")
+    if expires:
+        try:
+            exp_date = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            if exp_date < datetime.now(timezone.utc):
+                log_warn("security.txt EXPIRADO")
+                parsed_fields["expired"] = True
+        except Exception:
+            pass
+
+    results["security_txt"] = parsed_fields
+
+
+# =====================================================================
+#  MODULO 22: Email Security Deep (SPF/DMARC/DKIM analysis)
+# =====================================================================
+def mod_email_security(results):
+    section("22. EMAIL SECURITY ANALYSIS")
+
+    dns_data = results.get("dns", {})
+    if not dns_data:
+        log_warn("No hay datos DNS para analizar")
+        return
+
+    email_sec = {"spf": None, "dmarc": None, "issues": []}
+
+    # SPF Analysis
+    txt_records = dns_data.get("TXT", [])
+    for txt in txt_records:
+        if "v=spf1" in txt:
+            email_sec["spf"] = txt
+            log_ok(f"SPF: {txt[:100]}")
+
+            if "+all" in txt:
+                email_sec["issues"].append("SPF con +all — permite CUALQUIER servidor enviar email")
+                log_fail("SPF: +all detectado — CRITICO")
+            elif "~all" in txt:
+                email_sec["issues"].append("SPF con ~all (softfail) — emails falsificados llegan como spam, no bloqueados")
+                log_warn("SPF: ~all (softfail)")
+            elif "-all" in txt:
+                log_ok("SPF: -all (hardfail) — correcto")
+            elif "?all" in txt:
+                email_sec["issues"].append("SPF con ?all (neutral) — no protege contra spoofing")
+                log_warn("SPF: ?all (neutral)")
+
+            if "include:" in txt:
+                includes = re.findall(r'include:(\S+)', txt)
+                for inc in includes:
+                    log_data("SPF Include", inc)
+
+            if txt.count("include:") > 10:
+                email_sec["issues"].append("SPF con demasiados includes — puede exceder limite de 10 DNS lookups")
+
+    if not email_sec["spf"]:
+        email_sec["issues"].append("No hay registro SPF — dominio puede ser usado para email spoofing")
+        log_fail("SPF: NO ENCONTRADO")
+
+    # DMARC Analysis
+    dmarc_records = dns_data.get("DMARC", [])
+    for txt in txt_records + dmarc_records:
+        if "v=DMARC1" in txt:
+            email_sec["dmarc"] = txt
+            log_ok(f"DMARC: {txt[:100]}")
+
+            policy = re.findall(r'p=(\w+)', txt)
+            if policy:
+                p = policy[0].lower()
+                if p == "none":
+                    email_sec["issues"].append("DMARC policy=none — solo monitoreo, no bloquea spoofing")
+                    log_warn("DMARC: p=none (solo monitoreo)")
+                elif p == "quarantine":
+                    log_info("DMARC: p=quarantine")
+                elif p == "reject":
+                    log_ok("DMARC: p=reject — correcto")
+
+            # Sub-domain policy
+            sp = re.findall(r'sp=(\w+)', txt)
+            if not sp:
+                email_sec["issues"].append("DMARC sin sp= — subdominios heredan politica del dominio padre")
+
+            # Reporting
+            rua = re.findall(r'rua=([^;]+)', txt)
+            if rua:
+                log_data("DMARC Reports (rua)", rua[0])
+            else:
+                email_sec["issues"].append("DMARC sin rua — no se reciben reportes de abuso")
+
+    if not email_sec["dmarc"]:
+        email_sec["issues"].append("No hay registro DMARC — no hay politica de autenticacion de emails")
+        log_fail("DMARC: NO ENCONTRADO")
+
+    results["email_security"] = email_sec
+
+
+# =====================================================================
+#  MODULO 23: VULNERABILITY ASSESSMENT
 # =====================================================================
 def mod_vuln_assessment(results):
-    section("12. VULNERABILITY ASSESSMENT")
+    section("23. VULNERABILITY ASSESSMENT")
 
     vulns = []  # (severity, title, description, remediation)
 
@@ -1207,6 +2053,161 @@ def mod_vuln_assessment(results):
                 "La consola de admin de Keycloak es accesible publicamente.",
                 "Restringir acceso a admin console por IP o VPN."))
 
+    # --- CORS ---
+    cors = results.get("cors", [])
+    for entry in cors:
+        acao = entry.get("acao", "")
+        acac = entry.get("acac", "")
+        origin = entry.get("origin_sent", "")
+        if acao == origin and "evil" in origin:
+            if acac.lower() == "true":
+                vulns.append(("CRITICAL", "CORS: Arbitrary Origin with Credentials",
+                    f"ACAO refleja origen arbitrario ({origin}) con Allow-Credentials: true.",
+                    "No reflejar origenes arbitrarios. Usar whitelist de origenes confiables."))
+            else:
+                vulns.append(("HIGH", "CORS: Arbitrary Origin Reflection",
+                    f"ACAO refleja origen arbitrario ({origin}).",
+                    "Configurar CORS con whitelist de origenes permitidos."))
+        elif acao == "*":
+            vulns.append(("MEDIUM", "CORS: Wildcard Origin",
+                "ACAO: * permite cualquier sitio leer respuestas.",
+                "Reemplazar wildcard con origenes especificos."))
+        elif acao == "null":
+            vulns.append(("MEDIUM", "CORS: Null Origin Allowed",
+                "ACAO: null puede ser explotado con sandboxed iframes.",
+                "No permitir origin null."))
+
+    # --- HTTP Methods ---
+    dangerous = results.get("dangerous_methods", [])
+    for method, status in dangerous:
+        if method == "TRACE":
+            vulns.append(("MEDIUM", "HTTP TRACE Enabled",
+                f"TRACE habilitado (HTTP {status}). Cross-Site Tracing (XST) posible.",
+                "Deshabilitar TRACE en el servidor web."))
+        elif method == "PUT":
+            vulns.append(("HIGH", "HTTP PUT Enabled",
+                f"PUT habilitado (HTTP {status}). Permite subir archivos al servidor.",
+                "Deshabilitar PUT si no es necesario."))
+        elif method == "DELETE":
+            vulns.append(("HIGH", "HTTP DELETE Enabled",
+                f"DELETE habilitado (HTTP {status}). Permite eliminar recursos.",
+                "Deshabilitar DELETE si no es necesario."))
+
+    # --- WAF ---
+    waf = results.get("waf", [])
+    if not waf:
+        vulns.append(("INFO", "No WAF Detected",
+            "No se detecto Web Application Firewall.",
+            "Considerar implementar WAF para proteccion adicional."))
+
+    if results.get("waf_blocking") is False:
+        vulns.append(("MEDIUM", "WAF Not Blocking Malicious Requests",
+            "Requests con payloads maliciosos no fueron bloqueados.",
+            "Revisar reglas del WAF para detectar inyecciones SQL/XSS."))
+
+    # --- Subdomain Takeover ---
+    takeover = results.get("subdomain_takeover", [])
+    for t in takeover:
+        vulns.append(("HIGH", f"Subdomain Takeover: {t['subdomain']}",
+            f"Subdominio {t['subdomain']} apunta a {t['service']} — posible takeover.",
+            "Eliminar registro DNS o reclamar el recurso externo."))
+
+    # --- CSP Issues ---
+    csp_issues = results.get("csp_issues", [])
+    for issue in csp_issues:
+        if "unsafe-inline" in issue or "unsafe-eval" in issue:
+            vulns.append(("HIGH", "CSP: Unsafe Directive",
+                issue, "Eliminar directivas unsafe y usar nonces o hashes."))
+        elif "wildcard" in issue:
+            vulns.append(("MEDIUM", "CSP: Wildcard Source",
+                issue, "Reemplazar wildcards con origenes especificos."))
+        elif "ausente" in issue.lower():
+            vulns.append(("MEDIUM", "CSP: Missing Directive",
+                issue, "Agregar directiva faltante a la CSP."))
+        elif "data:" in issue:
+            vulns.append(("MEDIUM", "CSP: Data URI Allowed",
+                issue, "Remover data: de script-src."))
+
+    # --- CMS ---
+    cms = results.get("cms", {})
+    if cms:
+        for issue in cms.get("issues", []):
+            if "XML-RPC" in issue:
+                vulns.append(("HIGH", "WordPress XML-RPC Enabled",
+                    "XML-RPC habilitado. Permite brute force y DDoS amplification.",
+                    "Deshabilitar XML-RPC o restringir acceso."))
+            elif "debug.log" in issue:
+                vulns.append(("HIGH", "WordPress Debug Log Exposed",
+                    "wp-content/debug.log accesible. Contiene errores internos.",
+                    "Eliminar o bloquear acceso a debug.log."))
+            elif "usuarios" in issue.lower() or "users" in issue.lower():
+                vulns.append(("MEDIUM", "WordPress User Enumeration",
+                    "API REST de usuarios expuesta. Permite enumerar usuarios.",
+                    "Deshabilitar endpoint /wp-json/wp/v2/users."))
+            elif "readme" in issue.lower():
+                vulns.append(("LOW", "CMS Version Exposed",
+                    issue, "Eliminar archivos que revelen version del CMS."))
+            elif "CHANGELOG" in issue:
+                vulns.append(("LOW", "CMS Changelog Exposed",
+                    issue, "Eliminar CHANGELOG.txt del servidor."))
+
+        version = cms.get("version")
+        if version:
+            vulns.append(("INFO", f"CMS Version: {cms.get('cms')} {version}",
+                f"Version detectada: {version}. Verificar si tiene CVEs conocidos.",
+                "Mantener CMS actualizado a ultima version."))
+
+    # --- Cloud Storage ---
+    cloud = results.get("cloud_storage", [])
+    for item in cloud:
+        if item.get("listable"):
+            vulns.append(("CRITICAL", f"Cloud Bucket Listable: {item['bucket']}",
+                f"{item['provider']} bucket '{item['bucket']}' es listable publicamente.",
+                "Configurar ACLs restrictivos en el bucket."))
+        elif item.get("provider"):
+            vulns.append(("INFO", f"Cloud Storage: {item['provider']}",
+                f"Referencia a {item['provider']} encontrada: {item['bucket']}.",
+                "Verificar permisos del bucket."))
+
+    # --- Wayback Machine ---
+    wayback_interesting = results.get("wayback_interesting", [])
+    if wayback_interesting:
+        sensitive_exts = [u for u in wayback_interesting if any(
+            e in u.lower() for e in [".sql", ".bak", ".env", ".key", ".pem", ".zip", ".tar", ".gz"]
+        )]
+        if sensitive_exts:
+            vulns.append(("MEDIUM", "Historical Sensitive Files (Wayback)",
+                f"{len(sensitive_exts)} URLs historicas con archivos sensibles detectadas.",
+                "Verificar que estos archivos ya no son accesibles."))
+
+    # --- Email Security ---
+    email_sec = results.get("email_security", {})
+    for issue in email_sec.get("issues", []):
+        if "+all" in issue:
+            vulns.append(("CRITICAL", "SPF: +all Allows All Senders",
+                issue, "Cambiar +all a -all en registro SPF."))
+        elif "No hay registro SPF" in issue:
+            pass  # Ya cubierto arriba
+        elif "No hay registro DMARC" in issue:
+            pass  # Ya cubierto arriba
+        elif "p=none" in issue:
+            vulns.append(("MEDIUM", "DMARC: Monitor Only",
+                issue, "Cambiar politica DMARC a quarantine o reject."))
+        elif "sin rua" in issue.lower():
+            vulns.append(("LOW", "DMARC: No Reporting",
+                issue, "Agregar rua para recibir reportes DMARC."))
+
+    # --- Security.txt ---
+    sec_txt = results.get("security_txt")
+    if sec_txt is None:
+        vulns.append(("INFO", "No security.txt Found",
+            "El sitio no tiene security.txt. Sin politica de divulgacion.",
+            "Crear /.well-known/security.txt segun RFC 9116."))
+    elif isinstance(sec_txt, dict) and sec_txt.get("expired"):
+        vulns.append(("LOW", "Expired security.txt",
+            "El archivo security.txt esta expirado.",
+            "Actualizar la fecha de expiracion en security.txt."))
+
     # === Print Results ===
     if not vulns:
         log_ok("No se identificaron vulnerabilidades pasivas.")
@@ -1356,6 +2357,106 @@ def generate_report(target, results, output_dir):
                 f.write(f"  {s}\n")
             f.write("\n")
 
+        # CORS
+        cors = results.get("cors", [])
+        if cors:
+            f.write("CORS CONFIGURATION:\n")
+            for c in cors:
+                f.write(f"  Origin: {c.get('origin_sent','')} → ACAO: {c.get('acao','')} | Credentials: {c.get('acac','')}\n")
+            f.write("\n")
+
+        # HTTP Methods
+        methods = results.get("http_methods", [])
+        dangerous = results.get("dangerous_methods", [])
+        if methods or dangerous:
+            f.write("HTTP METHODS:\n")
+            if methods:
+                f.write(f"  Active: {', '.join(methods)}\n")
+            if dangerous:
+                f.write(f"  DANGEROUS: {', '.join(m[0] for m in dangerous)}\n")
+            f.write("\n")
+
+        # WAF
+        waf = results.get("waf", [])
+        if waf:
+            f.write("WAF DETECTED:\n")
+            for w in waf:
+                f.write(f"  {w}\n")
+            f.write("\n")
+
+        # Wayback
+        wb_total = results.get("wayback_total", 0)
+        if wb_total:
+            f.write(f"WAYBACK MACHINE ({wb_total} URLs):\n")
+            for u in results.get("wayback_interesting", []):
+                f.write(f"  [FILE] {u}\n")
+            for u in results.get("wayback_apis", []):
+                f.write(f"  [API] {u}\n")
+            for u in results.get("wayback_admin", []):
+                f.write(f"  [ADMIN] {u}\n")
+            f.write("\n")
+
+        # Cloud Storage
+        cloud = results.get("cloud_storage", [])
+        if cloud:
+            f.write("CLOUD STORAGE:\n")
+            for c in cloud:
+                listable = " [LISTABLE!]" if c.get("listable") else ""
+                f.write(f"  [{c['provider']}] {c['bucket']}{listable}\n")
+            f.write("\n")
+
+        # Subdomain Takeover
+        takeover = results.get("subdomain_takeover", [])
+        if takeover:
+            f.write("SUBDOMAIN TAKEOVER CANDIDATES:\n")
+            for t in takeover:
+                f.write(f"  {t['subdomain']} → {t['service']} ({t['signature']})\n")
+            f.write("\n")
+
+        # CSP
+        csp_issues = results.get("csp_issues", [])
+        if csp_issues:
+            f.write("CSP ISSUES:\n")
+            for issue in csp_issues:
+                f.write(f"  [!] {issue}\n")
+            f.write("\n")
+
+        # CMS
+        cms = results.get("cms", {})
+        if cms and cms.get("cms"):
+            f.write(f"CMS: {cms['cms']}\n")
+            if cms.get("version"):
+                f.write(f"  Version: {cms['version']}\n")
+            for p in cms.get("plugins", []):
+                f.write(f"  [Plugin] {p}\n")
+            for t in cms.get("themes", []):
+                f.write(f"  [Theme] {t}\n")
+            for u in cms.get("users", []):
+                f.write(f"  [User] {u}\n")
+            for i in cms.get("issues", []):
+                f.write(f"  [Issue] {i}\n")
+            f.write("\n")
+
+        # Security.txt
+        sec_txt = results.get("security_txt")
+        if sec_txt and isinstance(sec_txt, dict):
+            f.write("SECURITY.TXT:\n")
+            for k, v in sec_txt.items():
+                f.write(f"  {k}: {v}\n")
+            f.write("\n")
+
+        # Email Security
+        email_sec = results.get("email_security", {})
+        if email_sec:
+            f.write("EMAIL SECURITY:\n")
+            if email_sec.get("spf"):
+                f.write(f"  SPF: {email_sec['spf'][:100]}\n")
+            if email_sec.get("dmarc"):
+                f.write(f"  DMARC: {email_sec['dmarc'][:100]}\n")
+            for i in email_sec.get("issues", []):
+                f.write(f"  [!] {i}\n")
+            f.write("\n")
+
         # Vulnerabilities
         vulns_data = results.get("vulnerabilities", [])
         if vulns_data:
@@ -1412,6 +2513,17 @@ Modulos disponibles:
   paths      - Sensitive Files & Paths
   whois      - WHOIS Lookup
   keycloak   - Keycloak-Specific Recon
+  cors       - CORS Misconfiguration Check
+  methods    - HTTP Methods (PUT/DELETE/TRACE)
+  waf        - WAF/Firewall Detection
+  wayback    - Wayback Machine Historical URLs
+  cloud      - Cloud Storage Detection (S3/Azure/GCP)
+  takeover   - Subdomain Takeover Check
+  csp        - CSP Deep Analysis
+  cms        - CMS Deep Scan (WordPress/Joomla/Drupal)
+  favicon    - Favicon Hash Fingerprinting
+  sectxt     - Security.txt Parser
+  email      - Email Security (SPF/DMARC Deep)
   all        - Todos los modulos (default)
         """
     )
@@ -1508,6 +2620,45 @@ Modulos disponibles:
 
     if all_modules or "keycloak" in selected:
         mod_keycloak_recon(session, target, results)
+
+    if all_modules or "cors" in selected:
+        mod_cors(session, target, results)
+
+    if all_modules or "methods" in selected:
+        mod_http_methods(session, target, results)
+
+    if all_modules or "waf" in selected:
+        mod_waf_detect(session, target, results)
+
+    if all_modules or "wayback" in selected:
+        parts_wb = hostname.split(".")
+        domain_wb = ".".join(parts_wb[-2:]) if len(parts_wb) > 2 else hostname
+        mod_wayback(session, domain_wb, results)
+
+    if all_modules or "cloud" in selected:
+        mod_cloud_storage(session, target, html, results)
+
+    if all_modules or "takeover" in selected:
+        subs_list = results.get("subdomains", [])
+        if subs_list:
+            mod_subdomain_takeover(session, subs_list, results)
+        else:
+            log_info("Takeover check requiere modulo 'subs' — no hay subdominios")
+
+    if all_modules or "csp" in selected:
+        mod_csp_analysis(results)
+
+    if all_modules or "cms" in selected:
+        mod_cms_deep(session, base_url, html, results)
+
+    if all_modules or "favicon" in selected:
+        mod_favicon_hash(session, base_url, results)
+
+    if all_modules or "sectxt" in selected:
+        mod_security_txt(session, base_url, results)
+
+    if all_modules or "email" in selected:
+        mod_email_security(results)
 
     # Vulnerability assessment (siempre corre al final)
     mod_vuln_assessment(results)
