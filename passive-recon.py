@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PassiveRecon - Herramienta de reconocimiento pasivo para bug bounty
-Autor: Sebastian Rivera
+Autor: sebazzz88
 Uso: python3 passive-recon.py <url>
 
 Solo tecnicas pasivas - no escanea, no explota, no envia payloads.

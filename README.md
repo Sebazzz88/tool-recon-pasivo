@@ -1,6 +1,6 @@
 # PassiveRecon
 
-**Autor:** Sebastian Rivera ([@Sebazzz88](https://github.com/Sebazzz88))
+**Autor:** [sebazzz88](https://github.com/Sebazzz88)
 
 Herramienta de **reconocimiento pasivo** para bug bounty y auditoría de seguridad web. Recopila información de un objetivo usando **únicamente técnicas pasivas**: no escanea puertos, no explota, no envía payloads ofensivos. Analiza respuestas HTTP normales, registros públicos (DNS, WHOIS, certificados, Wayback) y la propia superficie del sitio para identificar tecnologías, configuraciones débiles y posibles puntos de interés.
 
