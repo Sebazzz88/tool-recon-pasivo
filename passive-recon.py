@@ -1785,10 +1785,863 @@ def mod_email_security(results):
 
 
 # =====================================================================
-#  MODULO 23: VULNERABILITY ASSESSMENT
+#  MODULO 23: Open Redirect Detection
+# =====================================================================
+def mod_open_redirect(session, base_url, html, results):
+    section("23. OPEN REDIRECT DETECTION")
+
+    redirect_params = [
+        "url", "redirect", "redirect_url", "redirect_uri", "next", "nextUrl",
+        "return", "returnUrl", "return_to", "rurl", "dest", "destination",
+        "redir", "redirect_to", "out", "view", "login_url", "image_url",
+        "go", "goto", "target", "link", "to", "uri", "continue", "window",
+        "data", "reference", "site", "html", "val", "validate", "domain",
+        "callback", "path", "return_path", "checkout_url", "forward",
+        "location", "r", "u", "n", "page", "feed", "host",
+    ]
+
+    redirect_findings = []
+    parsed = urlparse(base_url)
+
+    # Check for redirect parameters in page links
+    link_pattern = re.findall(r'href=["\']([^"\']*)["\']', html)
+    for link in link_pattern:
+        for param in redirect_params:
+            if f"{param}=" in link.lower():
+                redirect_findings.append({"type": "link_param", "url": link[:200], "param": param})
+                break
+
+    # Check forms for redirect fields
+    form_inputs = re.findall(r'<input[^>]*name=["\']([^"\']*)["\'][^>]*>', html, re.I)
+    for inp in form_inputs:
+        if inp.lower() in redirect_params:
+            redirect_findings.append({"type": "form_field", "field": inp})
+
+    # Check meta refresh
+    meta_refresh = re.findall(r'<meta[^>]*http-equiv=["\']refresh["\'][^>]*content=["\']([^"\']*)["\']', html, re.I)
+    for mr in meta_refresh:
+        redirect_findings.append({"type": "meta_refresh", "content": mr[:200]})
+
+    # Test common redirect endpoints
+    redirect_endpoints = [
+        "/redirect?url=https://evil.com",
+        "/login?next=https://evil.com",
+        "/login?redirect=https://evil.com",
+        "/logout?return=https://evil.com",
+        "/sso?redirect_uri=https://evil.com",
+    ]
+
+    for endpoint in redirect_endpoints:
+        try:
+            r = session.get(f"{base_url}{endpoint}", timeout=8, allow_redirects=False)
+            location = r.headers.get("Location", "")
+            if "evil.com" in location:
+                redirect_findings.append({"type": "confirmed_redirect", "endpoint": endpoint, "location": location})
+                log_fail(f"OPEN REDIRECT: {endpoint} → {location}")
+            elif r.status_code in [301, 302, 303, 307, 308]:
+                log_info(f"{endpoint} → {r.status_code} → {location[:100]}")
+        except Exception:
+            continue
+
+    if redirect_findings:
+        confirmed = [f for f in redirect_findings if f["type"] == "confirmed_redirect"]
+        params = [f for f in redirect_findings if f["type"] == "link_param"]
+        if confirmed:
+            log_fail(f"Open redirects confirmados: {len(confirmed)}")
+        if params:
+            log_info(f"Parametros de redirect en links: {len(params)}")
+            for p in params[:5]:
+                log_data("Param", f"{p['param']} en {p['url'][:80]}")
+    else:
+        log_ok("No se detectaron indicadores de open redirect")
+
+    results["open_redirect"] = redirect_findings
+
+
+# =====================================================================
+#  MODULO 24: JSONP Endpoint Detection
+# =====================================================================
+def mod_jsonp(session, base_url, html, results):
+    section("24. JSONP ENDPOINT DETECTION")
+
+    jsonp_findings = []
+
+    # Find JSONP endpoints in HTML
+    jsonp_pattern = re.findall(r'(?:src|href)=["\']([^"\']*(?:callback|jsonp|cb|func|function|handler)=[^"\']*)["\']', html, re.I)
+    for url in jsonp_pattern:
+        jsonp_findings.append({"type": "html_reference", "url": url[:200]})
+        log_ok(f"JSONP endpoint en HTML: {url[:100]}")
+
+    # Check common JSONP patterns
+    jsonp_endpoints = [
+        "/api?callback=test",
+        "/api/v1?callback=test",
+        "/json?callback=test",
+        "/data?jsonp=test",
+        "/feed?callback=test",
+        "/search?callback=test&q=a",
+    ]
+
+    for endpoint in jsonp_endpoints:
+        try:
+            r = session.get(f"{base_url}{endpoint}", timeout=8)
+            if r.status_code == 200:
+                body = r.text[:500]
+                if re.match(r'\s*test\s*\(', body) or "test(" in body:
+                    jsonp_findings.append({"type": "confirmed", "endpoint": endpoint})
+                    log_fail(f"JSONP activo: {endpoint}")
+        except Exception:
+            continue
+
+    # Look for callback parameters in JS files
+    js_callbacks = re.findall(r'[?&](callback|jsonp|cb)=([^&"\'>\s]+)', html)
+    for param, value in js_callbacks:
+        jsonp_findings.append({"type": "callback_param", "param": param, "value": value})
+
+    if not jsonp_findings:
+        log_info("No se detectaron endpoints JSONP")
+
+    results["jsonp"] = jsonp_findings
+
+
+# =====================================================================
+#  MODULO 25: Host Header Injection Check
+# =====================================================================
+def mod_host_header(session, url, results):
+    section("25. HOST HEADER INJECTION CHECK")
+
+    findings = []
+    parsed = urlparse(url)
+    original_host = parsed.hostname
+
+    # Test with different Host headers
+    tests = [
+        {"host": "evil.com", "desc": "arbitrary host"},
+        {"host": f"evil.com.{original_host}", "desc": "prepended host"},
+        {"host": f"{original_host}.evil.com", "desc": "appended host"},
+    ]
+
+    for test in tests:
+        try:
+            headers = {"Host": test["host"]}
+            r = session.get(url, headers=headers, timeout=8, allow_redirects=False)
+            body = r.text[:3000].lower()
+            resp_headers = str(r.headers).lower()
+
+            if test["host"].lower() in body or test["host"].lower() in resp_headers:
+                findings.append({"test": test["desc"], "host": test["host"], "reflected_in": "body/headers"})
+                log_fail(f"Host header reflejado: {test['host']} ({test['desc']})")
+
+            location = r.headers.get("Location", "")
+            if test["host"] in location:
+                findings.append({"test": test["desc"], "host": test["host"], "reflected_in": "Location header"})
+                log_fail(f"Host header en redirect: {location}")
+
+        except Exception:
+            continue
+
+    # X-Forwarded-Host test
+    try:
+        headers = {"X-Forwarded-Host": "evil.com"}
+        r = session.get(url, headers=headers, timeout=8)
+        if "evil.com" in r.text[:3000].lower():
+            findings.append({"test": "X-Forwarded-Host", "host": "evil.com", "reflected_in": "body"})
+            log_fail("X-Forwarded-Host reflejado en respuesta")
+    except Exception:
+        pass
+
+    if not findings:
+        log_ok("No se detecto host header injection")
+
+    results["host_header"] = findings
+
+
+# =====================================================================
+#  MODULO 26: Cache Poisoning Indicators
+# =====================================================================
+def mod_cache_poisoning(session, url, results):
+    section("26. CACHE POISONING INDICATORS")
+
+    findings = []
+
+    try:
+        r = session.get(url, timeout=10)
+        cache_headers = {}
+
+        for h in ["X-Cache", "X-Cache-Hits", "Age", "Via", "X-Served-By",
+                   "X-Cache-Status", "CF-Cache-Status", "X-Varnish",
+                   "X-Drupal-Cache", "X-Proxy-Cache", "Fastly-Debug-Digest",
+                   "X-CDN", "X-Edge-Location"]:
+            val = r.headers.get(h)
+            if val:
+                cache_headers[h] = val
+                log_data(h, val)
+
+        if cache_headers:
+            findings.append({"type": "cache_headers", "headers": cache_headers})
+            log_info("Sistema de cache detectado")
+
+            # Check if unkeyed headers affect response
+            unkeyed_headers = [
+                "X-Forwarded-Host", "X-Original-URL", "X-Rewrite-URL",
+                "X-Forwarded-Scheme", "X-Forwarded-Proto",
+                "X-HTTP-Method-Override", "X-Custom-IP-Authorization",
+            ]
+
+            for header in unkeyed_headers:
+                try:
+                    r2 = session.get(url, headers={header: "evil-test-value"}, timeout=8)
+                    if "evil-test-value" in r2.text[:3000]:
+                        findings.append({"type": "unkeyed_header_reflected", "header": header})
+                        log_fail(f"Header no-cacheado reflejado: {header}")
+                except Exception:
+                    continue
+
+            # Vary header analysis
+            vary = r.headers.get("Vary", "")
+            if vary:
+                log_data("Vary", vary)
+                if "Host" not in vary and "host" not in vary.lower():
+                    findings.append({"type": "vary_missing_host"})
+                    log_warn("Vary no incluye Host — cache poisoning posible")
+        else:
+            log_info("No se detectaron headers de cache")
+
+    except Exception as e:
+        log_fail(f"Error: {e}")
+
+    results["cache_poisoning"] = findings
+
+
+# =====================================================================
+#  MODULO 27: GraphQL Introspection Deep Check
+# =====================================================================
+def mod_graphql(session, base_url, results):
+    section("27. GRAPHQL INTROSPECTION")
+
+    graphql_endpoints = [
+        "/graphql", "/graphiql", "/v1/graphql", "/v2/graphql",
+        "/api/graphql", "/query", "/gql", "/graphql/console",
+    ]
+
+    introspection_query = '{"query":"{ __schema { types { name fields { name type { name } } } } }"}'
+
+    graphql_findings = []
+
+    for endpoint in graphql_endpoints:
+        url = f"{base_url}{endpoint}"
+        try:
+            # GET request
+            r = session.get(url, timeout=8)
+            if r.status_code == 200:
+                body = r.text[:500]
+                if any(x in body.lower() for x in ["graphql", "query", "__schema", "playground", "graphiql"]):
+                    graphql_findings.append({"endpoint": endpoint, "type": "interface_found"})
+                    log_ok(f"GraphQL endpoint: {endpoint}")
+
+            # POST introspection
+            r2 = session.post(url, data=introspection_query,
+                            headers={"Content-Type": "application/json"}, timeout=10)
+            if r2.status_code == 200:
+                try:
+                    data = r2.json()
+                    if "data" in data and "__schema" in str(data.get("data", {})):
+                        types = data.get("data", {}).get("__schema", {}).get("types", [])
+                        type_names = [t.get("name", "") for t in types if not t.get("name", "").startswith("__")]
+
+                        graphql_findings.append({
+                            "endpoint": endpoint,
+                            "type": "introspection_enabled",
+                            "types_count": len(type_names),
+                            "types": type_names[:20],
+                        })
+                        log_fail(f"INTROSPECTION HABILITADO en {endpoint}")
+                        log_info(f"  Tipos encontrados: {len(type_names)}")
+                        for t in type_names[:10]:
+                            log_data("  Type", t)
+
+                        # Look for sensitive types
+                        sensitive = [t for t in type_names if any(
+                            s in t.lower() for s in ["user", "admin", "password", "token",
+                                "secret", "credential", "payment", "order", "account",
+                                "email", "auth", "session", "role", "permission"]
+                        )]
+                        if sensitive:
+                            log_warn(f"  Tipos sensibles: {', '.join(sensitive)}")
+                            graphql_findings.append({"endpoint": endpoint, "type": "sensitive_types", "types": sensitive})
+                except Exception:
+                    pass
+
+        except Exception:
+            continue
+
+    if not graphql_findings:
+        log_info("No se detectaron endpoints GraphQL")
+
+    results["graphql"] = graphql_findings
+
+
+# =====================================================================
+#  MODULO 28: JWT Detection & Analysis
+# =====================================================================
+def mod_jwt_analysis(session, url, results):
+    section("28. JWT DETECTION & ANALYSIS")
+
+    jwt_findings = []
+
+    try:
+        r = session.get(url, timeout=10)
+
+        # Check cookies for JWTs
+        for cookie in r.cookies:
+            if re.match(r'^eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$', cookie.value):
+                jwt_findings.append({"location": f"cookie:{cookie.name}", "token": cookie.value[:50] + "..."})
+                log_ok(f"JWT en cookie: {cookie.name}")
+
+                # Decode header
+                try:
+                    header_b64 = cookie.value.split(".")[0]
+                    # Add padding
+                    header_b64 += "=" * (4 - len(header_b64) % 4)
+                    header = json.loads(base64.urlsafe_b64decode(header_b64))
+                    alg = header.get("alg", "")
+                    log_data("  Algorithm", alg)
+
+                    if alg.lower() == "none":
+                        jwt_findings.append({"issue": "alg_none", "cookie": cookie.name})
+                        log_fail(f"  JWT usa alg:none — CRITICO")
+                    elif alg.lower() in ["hs256", "hs384", "hs512"]:
+                        log_info(f"  HMAC signing ({alg}) — vulnerable si secret es debil")
+                    elif alg.lower().startswith("rs"):
+                        log_ok(f"  RSA signing ({alg})")
+
+                    typ = header.get("typ", "")
+                    kid = header.get("kid", "")
+                    if kid:
+                        log_data("  Key ID", kid)
+                    if header.get("jku"):
+                        jwt_findings.append({"issue": "jku_present", "jku": header["jku"]})
+                        log_warn(f"  JKU header presente: {header['jku']}")
+                    if header.get("x5u"):
+                        jwt_findings.append({"issue": "x5u_present", "x5u": header["x5u"]})
+                        log_warn(f"  X5U header presente: {header['x5u']}")
+
+                    # Decode payload (just for info, no secrets)
+                    payload_b64 = cookie.value.split(".")[1]
+                    payload_b64 += "=" * (4 - len(payload_b64) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+                    if "exp" in payload:
+                        exp_time = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+                        log_data("  Expires", exp_time.isoformat())
+                    if "role" in payload or "roles" in payload:
+                        log_data("  Roles", str(payload.get("role", payload.get("roles", ""))))
+
+                except Exception:
+                    pass
+
+        # Check Authorization header patterns in HTML/JS
+        auth_patterns = re.findall(r'(?:Authorization|Bearer|token)["\s:=]+\s*(eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)', r.text[:10000], re.I)
+        for token in auth_patterns:
+            jwt_findings.append({"location": "html/js", "token": token[:50] + "..."})
+            log_warn(f"JWT en HTML/JS: {token[:40]}...")
+
+        # Check response headers
+        for header_name, header_val in r.headers.items():
+            if re.match(r'^eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$', header_val):
+                jwt_findings.append({"location": f"header:{header_name}", "token": header_val[:50] + "..."})
+                log_ok(f"JWT en header: {header_name}")
+
+    except Exception as e:
+        log_fail(f"Error: {e}")
+
+    if not jwt_findings:
+        log_info("No se detectaron JWTs")
+
+    results["jwt"] = jwt_findings
+
+
+# =====================================================================
+#  MODULO 29: CRLF Injection Indicators
+# =====================================================================
+def mod_crlf(session, url, results):
+    section("29. CRLF INJECTION CHECK")
+
+    findings = []
+
+    payloads = [
+        "%0d%0aX-Injected: true",
+        "%0AX-Injected: true",
+        "%0DX-Injected: true",
+        "\\r\\nX-Injected: true",
+        "%E5%98%8A%E5%98%8DX-Injected: true",
+    ]
+
+    for payload in payloads:
+        test_url = f"{url}/?redirect={payload}"
+        try:
+            r = session.get(test_url, timeout=8, allow_redirects=False)
+            if "X-Injected" in str(r.headers):
+                findings.append({"type": "header_injection", "payload": payload})
+                log_fail(f"CRLF injection en headers: {payload}")
+            elif "X-Injected" in r.text[:1000]:
+                findings.append({"type": "body_injection", "payload": payload})
+                log_warn(f"CRLF reflejado en body: {payload}")
+        except Exception:
+            continue
+
+    if not findings:
+        log_ok("No se detecto CRLF injection")
+
+    results["crlf"] = findings
+
+
+# =====================================================================
+#  MODULO 30: Expanded API Key Detection
+# =====================================================================
+def mod_api_keys_deep(session, url, html, results):
+    section("30. API KEY & SECRET DEEP SCAN")
+
+    # Extended patterns
+    api_patterns = {
+        "AWS Access Key": r'AKIA[0-9A-Z]{16}',
+        "AWS Secret Key": r'(?:aws_secret|AWS_SECRET)["\s:=]+([A-Za-z0-9/+=]{40})',
+        "Stripe Publishable Key": r'pk_(?:live|test)_[a-zA-Z0-9]{20,}',
+        "Stripe Secret Key": r'sk_(?:live|test)_[a-zA-Z0-9]{20,}',
+        "Twilio API Key": r'SK[a-f0-9]{32}',
+        "Twilio Account SID": r'AC[a-f0-9]{32}',
+        "SendGrid API Key": r'SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}',
+        "Mailgun API Key": r'key-[a-zA-Z0-9]{32}',
+        "Slack Token": r'xox[bpas]-[a-zA-Z0-9-]+',
+        "Slack Webhook": r'https://hooks\.slack\.com/services/T[a-zA-Z0-9]+/B[a-zA-Z0-9]+/[a-zA-Z0-9]+',
+        "GitHub Token": r'gh[pousr]_[a-zA-Z0-9]{36,}',
+        "GitHub OAuth": r'gho_[a-zA-Z0-9]{36}',
+        "Google API Key": r'AIza[0-9A-Za-z_-]{35}',
+        "Google OAuth ID": r'[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com',
+        "Firebase Key": r'AAAA[a-zA-Z0-9_-]{7}:[a-zA-Z0-9_-]{140}',
+        "Heroku API Key": r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
+        "DigitalOcean Token": r'dop_v1_[a-f0-9]{64}',
+        "NPM Token": r'npm_[a-zA-Z0-9]{36}',
+        "Discord Token": r'[MN][A-Za-z0-9]{23,}\.[\w-]{6}\.[\w-]{27,}',
+        "Discord Webhook": r'https://discord(?:app)?\.com/api/webhooks/\d+/[\w-]+',
+        "Telegram Bot Token": r'\d{8,10}:[a-zA-Z0-9_-]{35}',
+        "Square Access Token": r'sq0atp-[a-zA-Z0-9_-]{22}',
+        "Square OAuth Secret": r'sq0csp-[a-zA-Z0-9_-]{43}',
+        "PayPal Bearer": r'A21AA[a-zA-Z0-9_-]+',
+        "Shopify Token": r'shpat_[a-fA-F0-9]{32}',
+        "Shopify Secret": r'shpss_[a-fA-F0-9]{32}',
+        "Shopify URL": r'[a-z0-9-]+\.myshopify\.com/admin/api/[0-9-]+',
+        "Mapbox Token": r'pk\.[a-zA-Z0-9]{60,}',
+        "Algolia API Key": r'[a-f0-9]{32}',
+        "Sentry DSN": r'https://[a-f0-9]{32}@[a-z0-9]+\.ingest\.sentry\.io/\d+',
+        "Datadog API Key": r'dd[a-f0-9]{40}',
+        "Private Key": r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----',
+        "PGP Private Block": r'-----BEGIN PGP PRIVATE KEY BLOCK-----',
+        "Generic Secret": r'(?:secret|password|passwd|pwd|token|api_key|apikey|api-key|access_token|auth_token|credentials)["\s:=]+["\']([a-zA-Z0-9_/+=-]{16,})["\']',
+        "Basic Auth": r'(?:Authorization|auth)["\s:=]+Basic\s+[a-zA-Z0-9+/=]+',
+        "Bearer Token": r'(?:Authorization|auth)["\s:=]+Bearer\s+[a-zA-Z0-9._-]+',
+        "Connection String": r'(?:mongodb|postgres|mysql|redis|amqp)://[^\s"\'<>]+',
+        "IP Address (Internal)": r'(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})',
+    }
+
+    all_text = html
+
+    # Also get JS files if available
+    js_files = results.get("js_analysis", {}).get("js_files_content", "")
+    if js_files:
+        all_text += js_files
+
+    found_keys = []
+
+    for name, pattern in api_patterns.items():
+        matches = re.findall(pattern, all_text)
+        if matches:
+            for m in list(set(matches))[:3]:
+                match_str = m if isinstance(m, str) else m[0] if m else ""
+                if len(match_str) < 8:
+                    continue
+                # Mask the key
+                masked = match_str[:6] + "..." + match_str[-4:] if len(match_str) > 14 else match_str[:4] + "..."
+                found_keys.append({"type": name, "masked": masked})
+                log_fail(f"{name}: {masked}")
+
+    if not found_keys:
+        log_ok("No se detectaron API keys o secretos expuestos")
+
+    results["api_keys_deep"] = found_keys
+
+
+# =====================================================================
+#  MODULO 31: Rate Limiting Check
+# =====================================================================
+def mod_rate_limit(session, url, results):
+    section("31. RATE LIMITING CHECK")
+
+    findings = {}
+
+    # Send rapid requests
+    status_codes = []
+    rate_headers = []
+
+    for i in range(15):
+        try:
+            r = session.get(url, timeout=8)
+            status_codes.append(r.status_code)
+
+            # Check for rate limit headers
+            for h in ["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+                       "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset",
+                       "Retry-After", "X-Rate-Limit"]:
+                val = r.headers.get(h)
+                if val and h not in [rh["header"] for rh in rate_headers]:
+                    rate_headers.append({"header": h, "value": val})
+                    log_data(h, val)
+
+            if r.status_code == 429:
+                log_ok(f"Rate limiting activo — HTTP 429 despues de {i+1} requests")
+                findings["rate_limited"] = True
+                findings["requests_before_limit"] = i + 1
+                break
+
+        except Exception:
+            break
+
+    if rate_headers:
+        findings["rate_headers"] = rate_headers
+
+    if 429 not in status_codes:
+        log_warn("No se detecto rate limiting despues de 15 requests rapidas")
+        findings["rate_limited"] = False
+
+    # Check login endpoint
+    login_paths = ["/login", "/signin", "/auth/login", "/api/login", "/api/auth/login"]
+    for path in login_paths:
+        try:
+            r = session.post(f"{url.rstrip('/')}{path}",
+                           data={"username": "test", "password": "test"},
+                           timeout=8)
+            if r.status_code not in [404, 405]:
+                findings[f"login_{path}"] = r.status_code
+                log_info(f"Login endpoint {path}: HTTP {r.status_code}")
+        except Exception:
+            continue
+
+    results["rate_limiting"] = findings
+
+
+# =====================================================================
+#  MODULO 32: Default Credentials Pages
+# =====================================================================
+def mod_default_pages(session, base_url, results):
+    section("32. DEFAULT / INSTALL PAGES DETECTION")
+
+    findings = []
+
+    default_pages = [
+        # Web servers
+        ("/", "Apache2 Ubuntu Default Page", "apache_default"),
+        ("/", "Welcome to nginx", "nginx_default"),
+        ("/", "IIS Windows Server", "iis_default"),
+        ("/", "It works!", "default_page"),
+        # CMS install pages
+        ("/wp-admin/install.php", "WordPress", "wp_install"),
+        ("/install.php", "installation", "generic_install"),
+        ("/installer", "install", "generic_installer"),
+        ("/setup", "setup", "setup_page"),
+        ("/install", "install", "install_page"),
+        # Framework debug/default
+        ("/rails/info/properties", "Rails", "rails_info"),
+        ("/elmah.axd", "ELMAH", "elmah"),
+        ("/_debugbar", "Debugbar", "laravel_debug"),
+        ("/telescope", "Telescope", "laravel_telescope"),
+        ("/horizon", "Horizon", "laravel_horizon"),
+        # Database managers
+        ("/phpmyadmin/", "phpMyAdmin", "phpmyadmin"),
+        ("/pma/", "phpMyAdmin", "pma"),
+        ("/adminer.php", "Adminer", "adminer"),
+        ("/pgadmin/", "pgAdmin", "pgadmin"),
+        # Monitoring
+        ("/grafana/", "Grafana", "grafana"),
+        ("/kibana/", "Kibana", "kibana"),
+        ("/prometheus/", "Prometheus", "prometheus"),
+        ("/nagios/", "Nagios", "nagios"),
+        ("/zabbix/", "Zabbix", "zabbix"),
+        # CI/CD
+        ("/jenkins/", "Jenkins", "jenkins"),
+        ("/hudson/", "Hudson", "hudson"),
+        # Cloud
+        ("/minio/", "MinIO", "minio"),
+        ("/portainer/", "Portainer", "portainer"),
+        ("/rancher/", "Rancher", "rancher"),
+        # Misc
+        ("/solr/", "Solr", "solr"),
+        ("/couchdb/", "CouchDB", "couchdb"),
+        ("/server-status", "Apache Server Status", "server_status"),
+        ("/server-info", "Apache Server Info", "server_info"),
+    ]
+
+    def check_page(entry):
+        path, keyword, tag = entry
+        try:
+            r = session.get(f"{base_url}{path}", timeout=8)
+            if r.status_code == 200 and keyword.lower() in r.text[:5000].lower():
+                return (path, keyword, tag)
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_page, e): e for e in default_pages}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                path, keyword, tag = result
+                findings.append({"path": path, "service": keyword, "tag": tag})
+                log_fail(f"Pagina default/instalacion: {path} ({keyword})")
+
+    if not findings:
+        log_ok("No se detectaron paginas de instalacion o default")
+
+    results["default_pages"] = findings
+
+
+# =====================================================================
+#  MODULO 33: Error Page Information Disclosure
+# =====================================================================
+def mod_error_disclosure(session, base_url, results):
+    section("33. ERROR PAGE INFORMATION DISCLOSURE")
+
+    findings = []
+
+    # Trigger different error pages
+    error_triggers = [
+        f"{base_url}/nonexistent_page_test_12345",
+        f"{base_url}/%00",
+        f"{base_url}/{{test}}",
+        f"{base_url}/index.php?id='",
+        f"{base_url}/.%00",
+        f"{base_url}/\\",
+    ]
+
+    info_patterns = {
+        "Stack Trace": [r"(?:Traceback|stack\s*trace|at\s+\w+\.\w+\()", r"Exception in thread"],
+        "File Path": [r"(?:/var/www|/home/\w+|/usr/local|/opt/|C:\\\\|/srv/)", r"(?:DocumentRoot|DOCUMENT_ROOT)"],
+        "Database Error": [r"(?:SQL syntax|mysql_|pg_|sqlite3\.|ORA-\d+|SQLSTATE)", r"(?:database error|db error)"],
+        "Framework Version": [r"(?:Laravel|Django|Flask|Express|Rails|Spring|Struts)\s*v?[\d.]+",
+                              r"(?:PHP/[\d.]+|Python/[\d.]+|Node\.js/[\d.]+)"],
+        "Server Config": [r"(?:Apache/[\d.]+|nginx/[\d.]+|IIS/[\d.]+)", r"(?:Server at|Port \d+)"],
+        "Debug Info": [r"(?:DEBUG\s*=\s*True|DJANGO_SETTINGS_MODULE|APP_DEBUG)",
+                       r"(?:display_errors|error_reporting)"],
+        "Internal IP": [r"(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})"],
+        "Email in Error": [r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"],
+        "Technology Stack": [r"(?:X-Powered-By|X-AspNet-Version|X-AspNetMvc-Version)"],
+    }
+
+    for trigger_url in error_triggers:
+        try:
+            r = session.get(trigger_url, timeout=8)
+            body = r.text[:5000]
+
+            for category, patterns in info_patterns.items():
+                for pattern in patterns:
+                    matches = re.findall(pattern, body, re.I)
+                    if matches:
+                        for m in matches[:2]:
+                            finding = {"category": category, "trigger": trigger_url.replace(base_url, ""), "match": str(m)[:100]}
+                            if finding not in findings:
+                                findings.append(finding)
+                                log_warn(f"{category}: {str(m)[:80]}")
+
+            # Check for verbose error headers
+            for header in ["X-Debug-Token", "X-Debug-Token-Link"]:
+                val = r.headers.get(header)
+                if val:
+                    findings.append({"category": "Debug Header", "trigger": "error_page", "match": f"{header}: {val}"})
+                    log_fail(f"Debug header en error: {header}: {val}")
+
+        except Exception:
+            continue
+
+    if not findings:
+        log_ok("Error pages no revelan informacion sensible")
+
+    results["error_disclosure"] = findings
+
+
+# =====================================================================
+#  MODULO 34: HTTP Request Smuggling Indicators
+# =====================================================================
+def mod_smuggling_indicators(session, url, results):
+    section("34. HTTP REQUEST SMUGGLING INDICATORS")
+
+    findings = []
+
+    try:
+        r = session.get(url, timeout=10)
+
+        # Check for reverse proxy indicators (smuggling usually needs proxy + backend)
+        proxy_indicators = []
+        via = r.headers.get("Via", "")
+        if via:
+            proxy_indicators.append(f"Via: {via}")
+        server = r.headers.get("Server", "")
+        x_powered = r.headers.get("X-Powered-By", "")
+
+        if via or ("nginx" in server.lower() and x_powered) or "cloudflare" in str(r.headers).lower():
+            findings.append({"type": "proxy_detected", "indicators": proxy_indicators or [server]})
+            log_info("Proxy/CDN detectado (prerrequisito para smuggling)")
+
+        # Check Transfer-Encoding handling
+        try:
+            headers = {"Transfer-Encoding": "chunked, identity"}
+            r2 = session.get(url, headers=headers, timeout=8)
+            if r2.status_code != r.status_code:
+                findings.append({"type": "te_ambiguity", "normal_status": r.status_code, "te_status": r2.status_code})
+                log_warn(f"Diferencia con TE ambiguo: {r.status_code} vs {r2.status_code}")
+        except Exception:
+            pass
+
+        # Check for HTTP/2 downgrade
+        try:
+            r3 = session.get(url, timeout=8)
+            if hasattr(r3, 'raw') and hasattr(r3.raw, 'version'):
+                version = r3.raw.version
+                if version == 11:
+                    log_info("HTTP/1.1 — posible smuggling si hay proxy")
+                elif version == 20:
+                    log_info("HTTP/2 — H2C smuggling posible si downgrade")
+                findings.append({"type": "http_version", "version": version})
+        except Exception:
+            pass
+
+    except Exception as e:
+        log_fail(f"Error: {e}")
+
+    if not findings:
+        log_info("No se detectaron indicadores de request smuggling")
+
+    results["smuggling"] = findings
+
+
+# =====================================================================
+#  MODULO 35: SSRF Indicator Detection
+# =====================================================================
+def mod_ssrf_indicators(session, url, html, results):
+    section("35. SSRF INDICATOR DETECTION")
+
+    findings = []
+
+    # Parameters that commonly lead to SSRF
+    ssrf_params = [
+        "url", "uri", "path", "dest", "redirect", "file", "page",
+        "document", "folder", "root", "dir", "img", "image", "load",
+        "target", "proxy", "host", "site", "html", "val", "data",
+        "fetch", "request", "resource", "content", "src", "source",
+        "ref", "callback", "domain", "feed", "rss", "xml",
+    ]
+
+    # Check URL parameters for SSRF-prone patterns
+    urls_in_page = re.findall(r'(?:href|src|action|data-url)=["\']([^"\']*\?[^"\']*)["\']', html)
+    for found_url in urls_in_page:
+        for param in ssrf_params:
+            if f"{param}=" in found_url.lower():
+                val_match = re.findall(f'{param}=([^&"\']+)', found_url, re.I)
+                if val_match:
+                    val = val_match[0]
+                    if val.startswith(("http", "//", "/")) or "." in val:
+                        findings.append({"type": "url_param", "param": param, "url": found_url[:200]})
+                        log_warn(f"Parametro SSRF potencial: {param}={val[:60]}")
+                        break
+
+    # Check for URL fetch/proxy endpoints
+    fetch_endpoints = [
+        "/proxy?url=", "/fetch?url=", "/api/proxy?url=",
+        "/image?url=", "/img?src=", "/load?url=",
+        "/share?url=", "/preview?url=", "/check?url=",
+        "/webhook?url=", "/import?url=", "/export?url=",
+    ]
+
+    for endpoint in fetch_endpoints:
+        try:
+            test_url = f"{url.rstrip('/')}{endpoint}https://example.com"
+            r = session.get(test_url, timeout=8)
+            if r.status_code == 200 and len(r.text) > 100:
+                findings.append({"type": "fetch_endpoint", "endpoint": endpoint, "status": r.status_code})
+                log_warn(f"Posible proxy/fetch: {endpoint} (HTTP {r.status_code})")
+        except Exception:
+            continue
+
+    if not findings:
+        log_ok("No se detectaron indicadores de SSRF")
+
+    results["ssrf_indicators"] = findings
+
+
+# =====================================================================
+#  MODULO 36: Broken Link Hijacking
+# =====================================================================
+def mod_broken_links(session, base_url, html, results):
+    section("36. BROKEN LINK HIJACKING")
+
+    findings = []
+
+    # Extract external links
+    external_links = re.findall(r'href=["\']((https?://[^"\']+))["\']', html)
+    external_domains = set()
+
+    for full_url, _ in external_links:
+        try:
+            parsed = urlparse(full_url)
+            if parsed.hostname and parsed.hostname != urlparse(base_url).hostname:
+                external_domains.add(parsed.hostname)
+        except Exception:
+            continue
+
+    log_info(f"Dominios externos encontrados: {len(external_domains)}")
+
+    # Check if external domains are expired/available
+    checked = 0
+    for domain in list(external_domains)[:30]:
+        try:
+            socket.getaddrinfo(domain, None)
+        except socket.gaierror:
+            findings.append({"domain": domain, "type": "unresolvable"})
+            log_fail(f"Dominio externo NO resuelve: {domain} — posible hijacking")
+            checked += 1
+        except Exception:
+            pass
+
+        if checked >= 10:
+            break
+
+    # Check for links to known takeover-prone services
+    takeover_domains = [
+        "github.io", "herokuapp.com", "surge.sh", "bitbucket.io",
+        "ghost.io", "myshopify.com", "wordpress.com",
+        "tumblr.com", "cargocollective.com", "fly.dev",
+    ]
+
+    for full_url, _ in external_links:
+        for td in takeover_domains:
+            if td in full_url:
+                try:
+                    r = session.get(full_url, timeout=8)
+                    if r.status_code == 404:
+                        findings.append({"domain": full_url, "type": "404_takeover_service"})
+                        log_fail(f"Link a servicio takeover con 404: {full_url[:100]}")
+                except Exception:
+                    pass
+
+    if not findings:
+        log_ok("No se detectaron links rotos explotables")
+
+    results["broken_links"] = findings
+
+
+# =====================================================================
+#  MODULO 37: VULNERABILITY ASSESSMENT
 # =====================================================================
 def mod_vuln_assessment(results):
-    section("23. VULNERABILITY ASSESSMENT")
+    section("37. VULNERABILITY ASSESSMENT")
 
     vulns = []  # (severity, title, description, remediation)
 
@@ -1831,6 +2684,39 @@ def mod_vuln_assessment(results):
             "Sin COOP el sitio puede ser vulnerable a cross-origin attacks como Spectre.",
             "Agregar Cross-Origin-Opener-Policy: same-origin."))
 
+    if "COEP" in missing:
+        vulns.append(("INFO", "Missing Cross-Origin-Embedder-Policy",
+            "Sin COEP recursos cross-origin pueden filtrar datos via side-channels.",
+            "Agregar Cross-Origin-Embedder-Policy: require-corp."))
+
+    if "CORP" in missing:
+        vulns.append(("INFO", "Missing Cross-Origin-Resource-Policy",
+            "Sin CORP recursos del sitio pueden ser leidos por otros origenes.",
+            "Agregar Cross-Origin-Resource-Policy: same-origin."))
+
+    # Check dangerous headers present
+    x_xss = sec.get("x_xss_protection", "")
+    if x_xss and "1; mode=block" not in str(x_xss):
+        vulns.append(("LOW", "X-XSS-Protection Misconfigured",
+            f"X-XSS-Protection configurado como: {x_xss}. Puede desactivar filtros del navegador.",
+            "Usar X-XSS-Protection: 1; mode=block o removerlo y depender de CSP."))
+
+    cache_control = headers.get("Cache-Control", "")
+    if not cache_control:
+        vulns.append(("LOW", "Missing Cache-Control Header",
+            "Sin Cache-Control, paginas sensibles pueden cachearse en proxies/navegadores.",
+            "Agregar Cache-Control: no-store, no-cache para paginas sensibles."))
+    elif "public" in cache_control.lower() and "no-store" not in cache_control.lower():
+        vulns.append(("MEDIUM", "Cache-Control Allows Public Caching",
+            f"Cache-Control: {cache_control} — paginas sensibles pueden ser cacheadas.",
+            "Usar no-store para contenido sensible."))
+
+    pragma = headers.get("Pragma", "")
+    if "no-cache" not in pragma and not cache_control:
+        vulns.append(("INFO", "Missing Pragma: no-cache",
+            "Sin Pragma para compatibilidad con HTTP/1.0.",
+            "Agregar Pragma: no-cache junto con Cache-Control."))
+
     if len(missing) >= 7:
         vulns.append(("HIGH", "Severe Lack of Security Headers",
             f"Faltan {len(missing)} de 10 security headers criticos. Indica pobre hardening.",
@@ -1866,15 +2752,46 @@ def mod_vuln_assessment(results):
             except Exception:
                 pass
 
+        # Additional SSL checks
+        issuer = ssl_data.get("issuer", ())
+        subject = ssl_data.get("subject", ())
+        if issuer:
+            issuer_str = str(issuer)
+            if "self-signed" in issuer_str.lower() or issuer == subject:
+                vulns.append(("HIGH", "Self-Signed SSL Certificate",
+                    "Certificado SSL es self-signed. No confiable por navegadores.",
+                    "Usar certificado de una CA reconocida."))
+
+        # Check for wildcard certificate
+        san_data = results.get("ssl_sans", [])
+        wildcards = [s for s in san_data if s.startswith("*.")]
+        if wildcards:
+            vulns.append(("INFO", "Wildcard SSL Certificate",
+                f"Certificado wildcard: {', '.join(wildcards[:3])}.",
+                "Evaluar si wildcard certs son necesarios — aumentan superficie."))
+
+        # Check SHA-1 signature
+        sig_alg = ssl_data.get("signatureAlgorithm", "")
+        if "sha1" in str(sig_alg).lower():
+            vulns.append(("HIGH", "SSL Certificate Uses SHA-1",
+                "Certificado usa SHA-1 que es criptograficamente debil.",
+                "Renovar certificado con SHA-256 o superior."))
+
     # --- Cookies ---
     cookie_issues = results.get("cookie_issues", [])
     secure_missing = [c for c in cookie_issues if "Secure" in c]
     httponly_missing = [c for c in cookie_issues if "HttpOnly" in c]
+    samesite_missing = [c for c in cookie_issues if "SameSite" in c]
 
     if secure_missing:
         vulns.append(("HIGH", "Cookies Without Secure Flag",
             f"{len(secure_missing)} cookie(s) sin flag Secure. Pueden transmitirse por HTTP.",
             "Agregar flag Secure a todas las cookies."))
+
+    if samesite_missing:
+        vulns.append(("MEDIUM", "Cookies Without SameSite Attribute",
+            f"{len(samesite_missing)} cookie(s) sin SameSite. Vulnerable a CSRF.",
+            "Agregar SameSite=Strict o SameSite=Lax a todas las cookies."))
 
     if httponly_missing:
         vulns.append(("MEDIUM", "Cookies Without HttpOnly Flag",
@@ -1901,6 +2818,61 @@ def mod_vuln_assessment(results):
         vulns.append(("MEDIUM", "X-Powered-By Disclosure",
             f"X-Powered-By revela: {powered}",
             "Eliminar el header X-Powered-By."))
+
+    # Additional header checks
+    asp_ver = headers.get("X-AspNet-Version", "")
+    if asp_ver:
+        vulns.append(("MEDIUM", "ASP.NET Version Disclosure",
+            f"X-AspNet-Version: {asp_ver}",
+            "Eliminar X-AspNet-Version header."))
+
+    asp_mvc = headers.get("X-AspNetMvc-Version", "")
+    if asp_mvc:
+        vulns.append(("MEDIUM", "ASP.NET MVC Version Disclosure",
+            f"X-AspNetMvc-Version: {asp_mvc}",
+            "Eliminar X-AspNetMvc-Version header."))
+
+    generator = headers.get("X-Generator", "")
+    if generator:
+        vulns.append(("LOW", "X-Generator Header Disclosure",
+            f"X-Generator: {generator}",
+            "Eliminar X-Generator header."))
+
+    debug_header = headers.get("X-Debug-Token", "")
+    if debug_header:
+        vulns.append(("HIGH", "Debug Token in Response Headers",
+            f"X-Debug-Token: {debug_header}. Framework debug mode activo.",
+            "Deshabilitar modo debug en produccion."))
+
+    x_runtime = headers.get("X-Runtime", "")
+    if x_runtime:
+        vulns.append(("LOW", "X-Runtime Header Disclosure",
+            f"X-Runtime: {x_runtime}. Revela tiempo de procesamiento (timing attacks).",
+            "Eliminar X-Runtime header."))
+
+    # --- Technologies ---
+    techs = results.get("technologies", [])
+    for typ, val in techs:
+        val_lower = val.lower() if val else ""
+        if "jquery" in val_lower:
+            # Check for old jQuery versions
+            ver_match = re.search(r'(\d+\.\d+\.\d+)', val)
+            if ver_match:
+                jq_parts = [int(x) for x in ver_match.group(1).split(".")]
+                if jq_parts[0] < 3 or (jq_parts[0] == 3 and jq_parts[1] < 5):
+                    vulns.append(("MEDIUM", f"Outdated jQuery: {ver_match.group(1)}",
+                        f"jQuery {ver_match.group(1)} tiene CVEs conocidos (XSS).",
+                        "Actualizar jQuery a >= 3.5.0."))
+        elif "angularjs" in val_lower or "angular.js" in val_lower:
+            vulns.append(("MEDIUM", "AngularJS (1.x) Detected",
+                "AngularJS 1.x ya no recibe security updates. Vulnerable a template injection.",
+                "Migrar a Angular 2+ o framework moderno."))
+        elif "bootstrap" in val_lower:
+            ver_match = re.search(r'(\d+)\.\d+', val)
+            if ver_match and int(ver_match.group(1)) < 4:
+                vulns.append(("LOW", f"Outdated Bootstrap: {val}",
+                    "Bootstrap < 4 tiene XSS en data attributes.",
+                    "Actualizar Bootstrap a >= 5.x."))
 
     # --- Sensitive Paths ---
     sens_paths = results.get("sensitive_paths", [])
@@ -1982,6 +2954,34 @@ def mod_vuln_assessment(results):
             f"Emails encontrados: {', '.join(list(set(emails))[:5])}",
             "Evaluar si los emails expuestos pueden usarse para phishing/OSINT."))
 
+    # Additional JS checks
+    endpoints = js_analysis.get("endpoints", [])
+    if endpoints:
+        api_eps = [e for e in endpoints if "/api" in e.lower()]
+        admin_eps = [e for e in endpoints if "admin" in e.lower()]
+        if api_eps:
+            vulns.append(("MEDIUM", "API Endpoints Exposed in JavaScript",
+                f"{len(api_eps)} endpoint(s) API encontrados en JS. Facilita enumeracion.",
+                "Minimizar endpoints visibles en frontend JS."))
+        if admin_eps:
+            vulns.append(("MEDIUM", "Admin Endpoints in JavaScript",
+                f"{len(admin_eps)} endpoint(s) admin encontrados en JS.",
+                "No referenciar endpoints admin en frontend."))
+
+    internal_urls = js_analysis.get("internal_urls", [])
+    if internal_urls:
+        vulns.append(("MEDIUM", "Internal URLs in JavaScript",
+            f"{len(internal_urls)} URL(s) internas encontradas en JS.",
+            "Eliminar URLs internas del codigo frontend."))
+
+    comments = js_analysis.get("comments", [])
+    sensitive_comments = [c for c in (comments or []) if any(
+        w in c.lower() for w in ["todo", "fix", "hack", "bug", "password", "secret", "temp"])]
+    if sensitive_comments:
+        vulns.append(("LOW", "Sensitive Comments in JavaScript",
+            f"{len(sensitive_comments)} comentarios potencialmente sensibles en JS.",
+            "Eliminar comentarios de debug/temp del codigo en produccion."))
+
     # --- DNS ---
     dns_data = results.get("dns", {})
     has_spf = False
@@ -2006,6 +3006,35 @@ def mod_vuln_assessment(results):
             "No hay registro DMARC. No hay politica de autenticacion de emails.",
             "Agregar registro DMARC (_dmarc.domain)."))
 
+    # DNS zone transfer indicators
+    ns_records = dns_data.get("NS", [])
+    if len(ns_records) == 1:
+        vulns.append(("MEDIUM", "Single DNS Nameserver",
+            "Solo un nameserver. Unico punto de fallo para DNS.",
+            "Agregar al menos un nameserver secundario."))
+
+    # Check for DNSSEC
+    has_dnssec = any("DNSKEY" in str(dns_data.get(k, [])) or "RRSIG" in str(dns_data.get(k, []))
+                     for k in dns_data)
+    if dns_data and not has_dnssec:
+        vulns.append(("LOW", "No DNSSEC Detected",
+            "Sin DNSSEC. DNS spoofing/cache poisoning posible.",
+            "Implementar DNSSEC para autenticar respuestas DNS."))
+
+    # Check for CNAME on apex
+    cname_records = dns_data.get("CNAME", [])
+    if cname_records:
+        vulns.append(("INFO", "CNAME Records Found",
+            f"CNAME: {', '.join(cname_records[:3])}. Posible redirect o terceros.",
+            "Verificar que CNAMEs apuntan a servicios propios."))
+
+    # Check for wildcard DNS
+    mx_records = dns_data.get("MX", [])
+    if not mx_records and dns_data:
+        vulns.append(("INFO", "No MX Records",
+            "Sin registros MX. Dominio no recibe email (normal si no es para mail).",
+            "Agregar MX si el dominio necesita recibir emails."))
+
     # --- OAuth/OIDC ---
     oidc = results.get("oidc_config", {})
     if oidc:
@@ -2026,6 +3055,46 @@ def mod_vuln_assessment(results):
             vulns.append(("HIGH", "Resource Owner Password Grant Enabled",
                 "Password grant esta habilitado. Credenciales pasan por el cliente.",
                 "Deshabilitar password grant y usar authorization_code."))
+
+        if "client_credentials" in grants:
+            vulns.append(("INFO", "Client Credentials Grant Enabled",
+                "Client credentials flow habilitado. Verificar que solo clients confiables lo usan.",
+                "Restringir client credentials a clients de backend confiables."))
+
+        # Check PKCE support
+        code_challenge = oidc.get("code_challenge_methods_supported", [])
+        if "authorization_code" in grants and "S256" not in code_challenge:
+            vulns.append(("HIGH", "PKCE S256 Not Supported",
+                "Authorization code flow sin PKCE S256. Vulnerable a code interception.",
+                "Habilitar y requerir PKCE con S256."))
+
+        # Check token endpoint auth methods
+        token_auth = oidc.get("token_endpoint_auth_methods_supported", [])
+        if "client_secret_post" in token_auth:
+            vulns.append(("MEDIUM", "Token Auth: client_secret_post Enabled",
+                "Client secret enviado en POST body. Visible en logs.",
+                "Preferir client_secret_basic o private_key_jwt."))
+
+        # Check for registration endpoint
+        reg_ep = oidc.get("registration_endpoint")
+        if reg_ep:
+            vulns.append(("MEDIUM", "Dynamic Client Registration Open",
+                f"Endpoint de registro: {reg_ep}. Cualquiera puede registrar clients.",
+                "Restringir registro dinamico de clients OAuth."))
+
+        # Check for response types
+        resp_types = oidc.get("response_types_supported", [])
+        if "token" in resp_types:
+            vulns.append(("MEDIUM", "Implicit Token Response Type Enabled",
+                "response_type=token habilitado. Tokens expuestos en fragment.",
+                "Deshabilitar implicit y usar code flow con PKCE."))
+
+        # Check for userinfo endpoint security
+        userinfo = oidc.get("userinfo_endpoint")
+        if userinfo and "http://" in str(userinfo):
+            vulns.append(("HIGH", "UserInfo Endpoint Over HTTP",
+                f"UserInfo endpoint usa HTTP: {userinfo}.",
+                "Configurar HTTPS para todos los endpoints OAuth."))
 
     # --- Keycloak ---
     kc = results.get("keycloak_indicators", [])
@@ -2052,6 +3121,49 @@ def mod_vuln_assessment(results):
             vulns.append(("MEDIUM", "Keycloak Admin Console Accessible",
                 "La consola de admin de Keycloak es accesible publicamente.",
                 "Restringir acceso a admin console por IP o VPN."))
+
+    # --- Subdomain Count ---
+    subs = results.get("subdomains", [])
+    if len(subs) > 50:
+        vulns.append(("INFO", "Large Subdomain Surface",
+            f"{len(subs)} subdominios detectados. Gran superficie de ataque.",
+            "Auditar y eliminar subdominios innecesarios."))
+
+    wildcard_subs = [s for s in subs if s.startswith("*.")]
+    if wildcard_subs:
+        vulns.append(("MEDIUM", "Wildcard Subdomain Detected",
+            f"Wildcard DNS: {', '.join(wildcard_subs[:3])}. Facilita subdomain takeover.",
+            "Evitar wildcard DNS si no es necesario."))
+
+    # --- Robots.txt ---
+    robots = results.get("robots_txt", "")
+    if isinstance(robots, str):
+        if "Disallow: /" in robots and "User-agent: *" in robots:
+            # Check for admin paths disclosed in robots
+            disallowed = re.findall(r'Disallow:\s*(/\S+)', robots)
+            sensitive_disallowed = [d for d in disallowed if any(
+                w in d.lower() for w in ["admin", "login", "api", "internal", "private",
+                    "staging", "dev", "test", "backup", "config", "secret", "panel"])]
+            if sensitive_disallowed:
+                vulns.append(("MEDIUM", "Sensitive Paths Disclosed in robots.txt",
+                    f"robots.txt revela rutas sensibles: {', '.join(sensitive_disallowed[:5])}.",
+                    "No usar robots.txt para ocultar paths — usar autenticacion."))
+
+    # --- WHOIS ---
+    whois_data = results.get("whois", {})
+    if isinstance(whois_data, dict):
+        registrar = whois_data.get("registrar", "")
+        if registrar and any(x in str(registrar).lower() for x in ["godaddy", "namecheap", "1and1"]):
+            vulns.append(("INFO", f"Domain Registrar: {registrar}",
+                "Registrar identificado. Verificar que domain lock esta activado.",
+                "Activar domain lock y 2FA en cuenta del registrar."))
+
+    # --- Favicon ---
+    fav_data = results.get("favicon_hash", {})
+    if fav_data and fav_data.get("known_tech"):
+        vulns.append(("INFO", f"Technology via Favicon: {fav_data['known_tech']}",
+            f"Favicon hash identifica: {fav_data['known_tech']}.",
+            "Cambiar favicon default para evitar fingerprinting."))
 
     # --- CORS ---
     cors = results.get("cors", [])
@@ -2207,6 +3319,643 @@ def mod_vuln_assessment(results):
         vulns.append(("LOW", "Expired security.txt",
             "El archivo security.txt esta expirado.",
             "Actualizar la fecha de expiracion en security.txt."))
+
+    # --- Open Redirect ---
+    open_redir = results.get("open_redirect", [])
+    confirmed_redirects = [f for f in open_redir if f.get("type") == "confirmed_redirect"]
+    param_redirects = [f for f in open_redir if f.get("type") == "link_param"]
+    form_redirects = [f for f in open_redir if f.get("type") == "form_field"]
+    if confirmed_redirects:
+        vulns.append(("HIGH", "Open Redirect Confirmed",
+            f"{len(confirmed_redirects)} open redirect(s) confirmados. Permiten phishing.",
+            "Validar y sanitizar parametros de redireccion. Usar whitelist de destinos."))
+    if param_redirects:
+        vulns.append(("MEDIUM", "Redirect Parameters in Links",
+            f"{len(param_redirects)} links con parametros de redireccion detectados.",
+            "Verificar que parametros de redirect no aceptan URLs externas."))
+    if form_redirects:
+        vulns.append(("MEDIUM", "Redirect Fields in Forms",
+            f"{len(form_redirects)} campos de formulario con nombres de redireccion.",
+            "Validar campos de redireccion en el backend."))
+    meta_redir = [f for f in open_redir if f.get("type") == "meta_refresh"]
+    if meta_redir:
+        vulns.append(("LOW", "Meta Refresh Redirect",
+            f"{len(meta_redir)} meta refresh redirect(s) detectados.",
+            "Evaluar si meta refresh es necesario."))
+
+    # --- JSONP ---
+    jsonp = results.get("jsonp", [])
+    confirmed_jsonp = [f for f in jsonp if f.get("type") == "confirmed"]
+    if confirmed_jsonp:
+        vulns.append(("HIGH", "JSONP Endpoint Active",
+            f"{len(confirmed_jsonp)} endpoint(s) JSONP activos. Callback hijacking posible.",
+            "Migrar de JSONP a CORS. Validar parametro callback."))
+    html_jsonp = [f for f in jsonp if f.get("type") == "html_reference"]
+    if html_jsonp:
+        vulns.append(("MEDIUM", "JSONP References in HTML",
+            f"{len(html_jsonp)} referencia(s) a endpoints JSONP en HTML.",
+            "Evaluar si JSONP es necesario. Preferir CORS."))
+
+    # --- Host Header Injection ---
+    host_hdr = results.get("host_header", [])
+    for hh in host_hdr:
+        if hh.get("reflected_in") == "Location header":
+            vulns.append(("HIGH", "Host Header Injection in Redirect",
+                f"Host '{hh['host']}' reflejado en Location header ({hh['test']}).",
+                "No usar Host header para generar URLs. Configurar hostname en servidor."))
+        elif "X-Forwarded-Host" in hh.get("test", ""):
+            vulns.append(("HIGH", "X-Forwarded-Host Injection",
+                "X-Forwarded-Host reflejado en respuesta. Cache poisoning posible.",
+                "Ignorar o validar X-Forwarded-Host."))
+        else:
+            vulns.append(("MEDIUM", "Host Header Reflected",
+                f"Host '{hh['host']}' reflejado en respuesta ({hh['test']}).",
+                "No usar Host header para generar contenido dinamico."))
+
+    # --- Cache Poisoning ---
+    cache_poison = results.get("cache_poisoning", [])
+    for cp in cache_poison:
+        if cp.get("type") == "unkeyed_header_reflected":
+            vulns.append(("HIGH", f"Cache Poisoning: Unkeyed Header Reflected ({cp['header']})",
+                f"Header {cp['header']} no es parte de la cache key pero se refleja en respuesta.",
+                "Incluir headers relevantes en cache key o no reflejarlos."))
+        elif cp.get("type") == "vary_missing_host":
+            vulns.append(("MEDIUM", "Cache: Vary Header Missing Host",
+                "Vary no incluye Host. Cache poisoning via Host header posible.",
+                "Agregar Host al header Vary."))
+
+    # --- GraphQL ---
+    graphql = results.get("graphql", [])
+    for gq in graphql:
+        if gq.get("type") == "introspection_enabled":
+            vulns.append(("HIGH", f"GraphQL Introspection Enabled ({gq['endpoint']})",
+                f"Introspection habilitado. {gq.get('types_count', 0)} tipos expuestos.",
+                "Deshabilitar introspection en produccion."))
+        if gq.get("type") == "sensitive_types":
+            vulns.append(("HIGH", f"GraphQL: Sensitive Types Exposed ({gq['endpoint']})",
+                f"Tipos sensibles: {', '.join(gq['types'][:5])}.",
+                "Revisar autorizacion en queries de tipos sensibles."))
+        if gq.get("type") == "interface_found":
+            vulns.append(("MEDIUM", f"GraphQL Interface Found ({gq['endpoint']})",
+                "Interfaz GraphQL (GraphiQL/Playground) accesible.",
+                "Deshabilitar interfaces de desarrollo en produccion."))
+
+    # --- JWT ---
+    jwt_data = results.get("jwt", [])
+    for jt in jwt_data:
+        issue = jt.get("issue", "")
+        if issue == "alg_none":
+            vulns.append(("CRITICAL", "JWT: Algorithm None",
+                f"JWT en {jt.get('cookie', 'N/A')} usa alg:none. Sin verificacion de firma.",
+                "Rechazar tokens con alg:none. Validar algoritmo en backend."))
+        elif issue == "jku_present":
+            vulns.append(("HIGH", "JWT: JKU Header Present",
+                f"JWT contiene JKU: {jt.get('jku', '')}. Key injection posible.",
+                "No confiar en JKU del token. Usar keys locales."))
+        elif issue == "x5u_present":
+            vulns.append(("HIGH", "JWT: X5U Header Present",
+                f"JWT contiene X5U: {jt.get('x5u', '')}. Certificate injection posible.",
+                "No confiar en X5U del token. Validar certificados localmente."))
+        elif jt.get("location", "").startswith("html"):
+            vulns.append(("HIGH", "JWT Token Exposed in HTML/JS",
+                "JWT encontrado en codigo HTML/JavaScript.",
+                "No exponer tokens JWT en frontend."))
+
+    # --- CRLF ---
+    crlf = results.get("crlf", [])
+    for cr in crlf:
+        if cr.get("type") == "header_injection":
+            vulns.append(("HIGH", "CRLF Injection in Headers",
+                f"Inyeccion CRLF confirmada: {cr['payload']}.",
+                "Sanitizar caracteres CR/LF en input del usuario."))
+        elif cr.get("type") == "body_injection":
+            vulns.append(("MEDIUM", "CRLF Reflected in Body",
+                f"CRLF reflejado en body: {cr['payload']}.",
+                "Sanitizar input contra CRLF."))
+
+    # --- API Keys Deep ---
+    api_keys = results.get("api_keys_deep", [])
+    if api_keys:
+        critical_keys = [k for k in api_keys if any(x in k["type"].lower() for x in
+            ["secret", "private", "bearer", "connection", "basic auth"])]
+        high_keys = [k for k in api_keys if k not in critical_keys and any(x in k["type"].lower() for x in
+            ["aws", "stripe", "twilio", "sendgrid", "slack", "github", "firebase"])]
+        other_keys = [k for k in api_keys if k not in critical_keys and k not in high_keys]
+
+        if critical_keys:
+            types_str = ", ".join(set(k["type"] for k in critical_keys))
+            vulns.append(("CRITICAL", "Secret Keys/Credentials Exposed",
+                f"Secretos encontrados: {types_str}.",
+                "Rotar credenciales inmediatamente. Mover al backend."))
+        if high_keys:
+            types_str = ", ".join(set(k["type"] for k in high_keys))
+            vulns.append(("HIGH", "API Keys Exposed",
+                f"API keys encontradas: {types_str}.",
+                "Rotar API keys. No exponer en frontend."))
+        if other_keys:
+            types_str = ", ".join(set(k["type"] for k in other_keys[:5]))
+            vulns.append(("MEDIUM", "Potential Credentials Detected",
+                f"Patrones de credenciales: {types_str}.",
+                "Verificar y rotar si son credenciales reales."))
+
+        internal_ips = [k for k in api_keys if k["type"] == "IP Address (Internal)"]
+        if internal_ips:
+            vulns.append(("MEDIUM", "Internal IP Addresses Exposed",
+                f"{len(internal_ips)} IP(s) internas expuestas en codigo.",
+                "Eliminar IPs internas del frontend."))
+
+    # --- Rate Limiting ---
+    rate = results.get("rate_limiting", {})
+    if rate.get("rate_limited") is False:
+        vulns.append(("MEDIUM", "No Rate Limiting Detected",
+            "No se detecto rate limiting tras 15 requests rapidas.",
+            "Implementar rate limiting para prevenir brute force y DoS."))
+    if rate.get("rate_limited") and rate.get("requests_before_limit", 0) > 10:
+        vulns.append(("LOW", "Weak Rate Limiting",
+            f"Rate limiting activo pero permisivo: {rate['requests_before_limit']} requests antes de limitar.",
+            "Reducir umbral de rate limiting."))
+
+    # --- Default Pages ---
+    defaults = results.get("default_pages", [])
+    for dp in defaults:
+        tag = dp.get("tag", "")
+        if tag in ["wp_install", "generic_install", "generic_installer"]:
+            vulns.append(("CRITICAL", f"Installation Page Exposed: {dp['path']}",
+                f"Pagina de instalacion accesible ({dp['service']}). Posible RCE.",
+                "Completar o eliminar wizard de instalacion."))
+        elif tag in ["phpmyadmin", "pma", "adminer", "pgadmin"]:
+            vulns.append(("HIGH", f"Database Manager Exposed: {dp['path']}",
+                f"{dp['service']} accesible publicamente.",
+                "Restringir acceso por IP/VPN. Deshabilitar si no es necesario."))
+        elif tag in ["jenkins", "hudson"]:
+            vulns.append(("HIGH", f"CI/CD Tool Exposed: {dp['path']}",
+                f"{dp['service']} accesible publicamente.",
+                "Restringir acceso al panel CI/CD."))
+        elif tag in ["grafana", "kibana", "prometheus", "nagios", "zabbix"]:
+            vulns.append(("MEDIUM", f"Monitoring Tool Exposed: {dp['path']}",
+                f"{dp['service']} accesible publicamente.",
+                "Restringir acceso a herramientas de monitoreo."))
+        elif tag in ["laravel_debug", "laravel_telescope", "laravel_horizon"]:
+            vulns.append(("HIGH", f"Framework Debug Tool Exposed: {dp['path']}",
+                f"{dp['service']} accesible. Revela informacion interna.",
+                "Deshabilitar herramientas de debug en produccion."))
+        elif tag in ["server_status", "server_info", "elmah", "rails_info"]:
+            vulns.append(("HIGH", f"Server Info Exposed: {dp['path']}",
+                f"{dp['service']} accesible. Revela configuracion del servidor.",
+                "Deshabilitar o restringir endpoints de info."))
+        elif tag in ["minio", "portainer", "rancher", "solr", "couchdb"]:
+            vulns.append(("HIGH", f"Infrastructure Service Exposed: {dp['path']}",
+                f"{dp['service']} accesible publicamente.",
+                "Restringir acceso a servicios internos."))
+        elif tag.endswith("_default"):
+            vulns.append(("LOW", f"Default Page: {dp['path']}",
+                f"Pagina default de {dp['service']} detectada.",
+                "Configurar landing page apropiado."))
+
+    # --- Error Disclosure ---
+    errors = results.get("error_disclosure", [])
+    for err in errors:
+        cat = err.get("category", "")
+        if cat == "Stack Trace":
+            vulns.append(("HIGH", "Stack Trace in Error Page",
+                f"Stack trace expuesto: {err['match'][:80]}",
+                "Deshabilitar stack traces en produccion."))
+        elif cat == "Database Error":
+            vulns.append(("HIGH", "Database Error Disclosed",
+                f"Error de DB expuesto: {err['match'][:80]}",
+                "Configurar mensajes de error genericos para BD."))
+        elif cat == "File Path":
+            vulns.append(("MEDIUM", "Server Path Disclosed",
+                f"Ruta interna expuesta: {err['match'][:80]}",
+                "No exponer rutas internas en errores."))
+        elif cat == "Debug Info":
+            vulns.append(("HIGH", "Debug Mode Enabled",
+                f"Debug activo: {err['match'][:80]}",
+                "Deshabilitar modo debug en produccion."))
+        elif cat == "Framework Version":
+            vulns.append(("MEDIUM", "Framework Version Disclosed",
+                f"Version expuesta: {err['match'][:80]}",
+                "Ocultar version del framework."))
+        elif cat == "Internal IP":
+            vulns.append(("MEDIUM", "Internal IP in Error Page",
+                f"IP interna: {err['match']}",
+                "No exponer IPs internas en errores."))
+        elif cat == "Debug Header":
+            vulns.append(("HIGH", "Debug Headers in Response",
+                err["match"],
+                "Eliminar headers de debug."))
+        elif cat == "Email in Error":
+            vulns.append(("LOW", "Email in Error Page",
+                f"Email expuesto en error page: {err['match'][:60]}",
+                "No exponer emails en paginas de error."))
+        elif cat in ["Server Config", "Technology Stack"]:
+            vulns.append(("MEDIUM", f"{cat} Disclosed in Error",
+                err["match"][:80],
+                "Minimizar informacion en errores."))
+        elif cat == "Connection String":
+            vulns.append(("CRITICAL", "Database Connection String Exposed",
+                f"Connection string en error: {err['match'][:60]}",
+                "No exponer connection strings en errores."))
+
+    # Aggregate error disclosure
+    if errors:
+        categories = set(e.get("category") for e in errors)
+        if len(categories) >= 3:
+            vulns.append(("HIGH", "Verbose Error Pages (Multiple Categories)",
+                f"{len(errors)} info disclosures en {len(categories)} categorias.",
+                "Implementar error handling personalizado en produccion."))
+
+    # --- HTTP Method Override ---
+    method_override = results.get("method_override", {})
+    if method_override.get("override_works"):
+        vulns.append(("MEDIUM", "HTTP Method Override Enabled",
+            "X-HTTP-Method-Override permite cambiar metodo HTTP. Bypass de ACLs posible.",
+            "Deshabilitar method override en produccion."))
+
+    # --- HTTP Request Smuggling ---
+    smuggling = results.get("smuggling", [])
+    for sm in smuggling:
+        if sm.get("type") == "te_ambiguity":
+            vulns.append(("MEDIUM", "Transfer-Encoding Ambiguity",
+                f"Diferente respuesta con TE ambiguo: {sm['normal_status']} vs {sm['te_status']}.",
+                "Configurar manejo estricto de Transfer-Encoding."))
+        elif sm.get("type") == "proxy_detected":
+            vulns.append(("INFO", "Reverse Proxy Detected",
+                f"Indicadores de proxy: {', '.join(sm.get('indicators', []))}.",
+                "Verificar configuracion proxy vs backend contra smuggling."))
+
+    # --- SSRF Indicators ---
+    ssrf = results.get("ssrf_indicators", [])
+    fetch_ssrf = [s for s in ssrf if s.get("type") == "fetch_endpoint"]
+    param_ssrf = [s for s in ssrf if s.get("type") == "url_param"]
+    if fetch_ssrf:
+        vulns.append(("HIGH", "SSRF: Fetch/Proxy Endpoints Detected",
+            f"{len(fetch_ssrf)} endpoint(s) de fetch/proxy activos.",
+            "Validar y restringir URLs en proxy endpoints. Bloquear IPs internas."))
+    if param_ssrf:
+        vulns.append(("MEDIUM", "SSRF: URL Parameters Detected",
+            f"{len(param_ssrf)} parametro(s) que aceptan URLs detectados.",
+            "Validar parametros URL contra SSRF. Usar whitelist de destinos."))
+
+    # --- Broken Links ---
+    broken = results.get("broken_links", [])
+    unresolvable = [b for b in broken if b.get("type") == "unresolvable"]
+    takeover_404 = [b for b in broken if b.get("type") == "404_takeover_service"]
+    if unresolvable:
+        vulns.append(("MEDIUM", "Broken Link Hijacking: Unresolvable Domains",
+            f"{len(unresolvable)} link(s) a dominios que no resuelven. Hijacking posible.",
+            "Eliminar links a dominios expirados. Registrar si son propios."))
+    if takeover_404:
+        vulns.append(("HIGH", "Broken Link Hijacking: 404 on Takeover Service",
+            f"{len(takeover_404)} link(s) a servicios de hosting con 404.",
+            "Reclamar recursos en servicios externos o eliminar links."))
+
+    # --- Cookie Prefix Checks ---
+    cookies = results.get("cookies", [])
+    for ck in cookies:
+        name = ck.get("name", "")
+        flags = ck.get("flags", "")
+        flags_lower = flags.lower() if flags else ""
+        if name.startswith("__Host-"):
+            if "secure" not in flags_lower:
+                vulns.append(("HIGH", "Cookie __Host- Prefix Without Secure",
+                    f"Cookie {name} usa prefijo __Host- sin flag Secure.",
+                    "Cookies con __Host- DEBEN tener Secure, Path=/, y no Domain."))
+            if "path=/" not in flags_lower.replace(" ", ""):
+                vulns.append(("HIGH", "Cookie __Host- Prefix Without Path=/",
+                    f"Cookie {name} usa prefijo __Host- sin Path=/.",
+                    "Agregar Path=/ a cookies con prefijo __Host-."))
+        if name.startswith("__Secure-"):
+            if "secure" not in flags_lower:
+                vulns.append(("HIGH", "Cookie __Secure- Prefix Without Secure",
+                    f"Cookie {name} usa prefijo __Secure- sin flag Secure.",
+                    "Cookies con __Secure- DEBEN tener flag Secure."))
+
+    # --- SRI (Subresource Integrity) ---
+    html = results.get("html", "")
+    if html:
+        import re as _re
+        ext_scripts = _re.findall(r'<script[^>]+src=["\']https?://[^"\']+["\'][^>]*>', html, _re.I)
+        scripts_without_sri = [s for s in ext_scripts if 'integrity=' not in s.lower()]
+        if scripts_without_sri:
+            vulns.append(("MEDIUM", "External Scripts Without SRI",
+                f"{len(scripts_without_sri)} script(s) externo(s) sin integridad (integrity attribute).",
+                "Agregar integrity y crossorigin a scripts externos."))
+        ext_links = _re.findall(r'<link[^>]+href=["\']https?://[^"\']+["\'][^>]*stylesheet[^>]*>', html, _re.I)
+        links_without_sri = [l for l in ext_links if 'integrity=' not in l.lower()]
+        if links_without_sri:
+            vulns.append(("LOW", "External Stylesheets Without SRI",
+                f"{len(links_without_sri)} stylesheet(s) externo(s) sin integrity.",
+                "Agregar integrity attribute a stylesheets de CDN."))
+
+    # --- Mixed Content ---
+    if html:
+        http_resources = _re.findall(r'(?:src|href|action)=["\']http://[^"\']+', html, _re.I)
+        if http_resources:
+            vulns.append(("MEDIUM", "Mixed Content: HTTP Resources on HTTPS Page",
+                f"{len(http_resources)} recurso(s) cargado(s) por HTTP en pagina HTTPS.",
+                "Cambiar todos los recursos a HTTPS."))
+
+    # --- Form Security ---
+    if html:
+        forms = _re.findall(r'<form[^>]*>', html, _re.I)
+        for form in forms:
+            action = _re.search(r'action=["\']([^"\']*)', form, _re.I)
+            if action:
+                act_url = action.group(1)
+                if act_url.startswith("http://"):
+                    vulns.append(("HIGH", "Form Submits Over HTTP",
+                        f"Formulario envia datos por HTTP: {act_url[:60]}",
+                        "Cambiar action de formularios a HTTPS."))
+                    break
+        forms_no_csrf = []
+        form_blocks = _re.findall(r'<form[^>]*>.*?</form>', html, _re.I | _re.S)
+        for fb in form_blocks[:10]:
+            if 'csrf' not in fb.lower() and '_token' not in fb.lower() and 'authenticity' not in fb.lower():
+                if '<input' in fb.lower() and ('post' in fb.lower() or 'method' not in fb.lower()):
+                    forms_no_csrf.append(fb[:50])
+        if forms_no_csrf:
+            vulns.append(("HIGH", "Forms Without CSRF Token",
+                f"{len(forms_no_csrf)} formulario(s) POST sin token CSRF visible.",
+                "Implementar CSRF tokens en todos los formularios POST."))
+
+    # --- Iframe Sandbox ---
+    if html:
+        iframes = _re.findall(r'<iframe[^>]*>', html, _re.I)
+        iframes_no_sandbox = [i for i in iframes if 'sandbox' not in i.lower()]
+        if iframes_no_sandbox:
+            vulns.append(("MEDIUM", "Iframes Without Sandbox Attribute",
+                f"{len(iframes_no_sandbox)} iframe(s) sin sandbox attribute.",
+                "Agregar sandbox attribute a iframes para limitar capacidades."))
+        for iframe in iframes:
+            if 'sandbox' in iframe.lower() and 'allow-scripts' in iframe.lower() and 'allow-same-origin' in iframe.lower():
+                vulns.append(("HIGH", "Iframe Sandbox Bypass: allow-scripts + allow-same-origin",
+                    "Iframe con sandbox tiene allow-scripts y allow-same-origin juntos.",
+                    "No combinar allow-scripts con allow-same-origin en sandbox."))
+                break
+
+    # --- Permissions-Policy / Feature-Policy ---
+    hdrs = results.get("headers", {})
+    pp = hdrs.get("permissions-policy", hdrs.get("feature-policy", ""))
+    if pp:
+        sensitive_features = ["camera", "microphone", "geolocation", "payment", "usb", "bluetooth", "midi"]
+        for feat in sensitive_features:
+            if feat not in pp.lower():
+                vulns.append(("LOW", f"Permissions-Policy Missing: {feat}",
+                    f"Feature '{feat}' no restringida en Permissions-Policy.",
+                    f"Agregar {feat}=() a Permissions-Policy para deshabilitar."))
+    else:
+        vulns.append(("LOW", "No Permissions-Policy Header",
+            "Sin Permissions-Policy header. Features del navegador no restringidas.",
+            "Implementar Permissions-Policy para restringir camera, mic, geolocation, payment."))
+
+    # --- Email Security Advanced ---
+    email_sec = results.get("email_security", {})
+    if email_sec:
+        spf = email_sec.get("spf", "")
+        dmarc = email_sec.get("dmarc", "")
+        if spf and "+all" in spf:
+            vulns.append(("CRITICAL", "SPF Record Allows All Senders (+all)",
+                "SPF con +all permite que cualquier IP envie correo como este dominio.",
+                "Cambiar +all a -all o ~all en registro SPF."))
+        if spf and "~all" in spf:
+            vulns.append(("MEDIUM", "SPF Softfail (~all) Instead of Hardfail",
+                "SPF usa ~all (softfail). Correos falsificados pueden llegar.",
+                "Cambiar ~all a -all para rechazar correos no autorizados."))
+        if dmarc and "p=none" in dmarc.lower():
+            vulns.append(("MEDIUM", "DMARC Policy Set to None",
+                "DMARC con p=none solo monitorea, no bloquea spoofing.",
+                "Cambiar p=none a p=quarantine o p=reject."))
+        if dmarc and "rua=" not in dmarc.lower():
+            vulns.append(("LOW", "DMARC Without Aggregate Reporting (rua)",
+                "DMARC sin rua= no recibe reportes de autenticacion.",
+                "Agregar rua=mailto:reports@domain a politica DMARC."))
+        if not email_sec.get("dmarc"):
+            vulns.append(("HIGH", "No DMARC Record",
+                "Sin registro DMARC. Email spoofing del dominio posible.",
+                "Implementar DMARC con politica quarantine o reject."))
+        if not email_sec.get("spf"):
+            vulns.append(("HIGH", "No SPF Record",
+                "Sin registro SPF. Cualquier servidor puede enviar correo como este dominio.",
+                "Implementar registro SPF con -all."))
+
+    # --- Autocomplete on Sensitive Fields ---
+    if html:
+        password_fields = _re.findall(r'<input[^>]*type=["\']password["\'][^>]*>', html, _re.I)
+        for pf in password_fields:
+            if 'autocomplete=' not in pf.lower() or 'autocomplete="on"' in pf.lower():
+                vulns.append(("LOW", "Password Field With Autocomplete Enabled",
+                    "Campo de password sin autocomplete=off. Browser puede guardar password.",
+                    "Agregar autocomplete='off' o 'new-password' a campos de password."))
+                break
+
+    # --- Target Blank Without Noopener ---
+    if html:
+        target_blank = _re.findall(r'<a[^>]*target=["\']_blank["\'][^>]*>', html, _re.I)
+        no_noopener = [t for t in target_blank if 'noopener' not in t.lower() and 'noreferrer' not in t.lower()]
+        if no_noopener:
+            vulns.append(("LOW", "Links target=_blank Without rel=noopener",
+                f"{len(no_noopener)} link(s) con target=_blank sin noopener/noreferrer.",
+                "Agregar rel='noopener noreferrer' a links con target=_blank."))
+
+    # --- Sensitive HTML Comments ---
+    if html:
+        comments = _re.findall(r'<!--(.*?)-->', html, _re.S)
+        sensitive_comments = []
+        comment_patterns = ['todo', 'fixme', 'hack', 'bug', 'password', 'secret', 'key', 'token',
+                           'admin', 'debug', 'temp', 'remove', 'credential', 'api_key']
+        for c in comments:
+            for p in comment_patterns:
+                if p in c.lower():
+                    sensitive_comments.append(c.strip()[:60])
+                    break
+        if sensitive_comments:
+            vulns.append(("LOW", "Sensitive Information in HTML Comments",
+                f"{len(sensitive_comments)} comentario(s) HTML con info potencialmente sensible.",
+                "Eliminar comentarios sensibles del HTML en produccion."))
+
+    # --- Base Tag Hijacking ---
+    if html:
+        base_tags = _re.findall(r'<base[^>]*href=["\']([^"\']*)', html, _re.I)
+        for bt in base_tags:
+            if bt.startswith("http://"):
+                vulns.append(("HIGH", "Base Tag Using HTTP",
+                    f"Tag <base> apunta a HTTP: {bt[:60]}",
+                    "Cambiar <base> href a HTTPS."))
+                break
+
+    # --- Content-Type Header Checks ---
+    ct = hdrs.get("content-type", "")
+    if ct and "charset" not in ct.lower():
+        vulns.append(("LOW", "Content-Type Without Charset",
+            "Content-Type sin charset puede permitir charset sniffing attacks.",
+            "Agregar charset=utf-8 a Content-Type header."))
+
+    # --- Access-Control Headers ---
+    acao = hdrs.get("access-control-allow-origin", "")
+    acac = hdrs.get("access-control-allow-credentials", "")
+    if acao == "*" and acac.lower() == "true":
+        vulns.append(("CRITICAL", "CORS: Wildcard Origin + Credentials",
+            "CORS permite * con credentials. Cualquier sitio puede leer respuestas autenticadas.",
+            "No combinar Access-Control-Allow-Origin: * con Allow-Credentials: true."))
+    acah = hdrs.get("access-control-allow-headers", "")
+    if acah and "authorization" in acah.lower():
+        vulns.append(("MEDIUM", "CORS Allows Authorization Header",
+            "CORS permite enviar Authorization header desde origenes permitidos.",
+            "Restringir origenes permitidos cuando se expone Authorization."))
+
+    # --- Clickjacking via Double-Frame ---
+    xfo = hdrs.get("x-frame-options", "").upper()
+    if xfo == "SAMEORIGIN":
+        csp_full = hdrs.get("content-security-policy", "")
+        if "frame-ancestors" not in csp_full:
+            vulns.append(("LOW", "X-Frame-Options Without CSP frame-ancestors",
+                "Solo X-Frame-Options sin CSP frame-ancestors. X-Frame-Options puede ser bypassed.",
+                "Complementar X-Frame-Options con CSP frame-ancestors."))
+
+    # --- Server Timing ---
+    st = hdrs.get("server-timing", "")
+    if st:
+        vulns.append(("LOW", "Server-Timing Header Present",
+            f"Server-Timing expone metricas internas: {st[:80]}",
+            "Deshabilitar Server-Timing en produccion o limitar info."))
+
+    # --- X-Powered-By Variants ---
+    for h in ["x-aspnet-version", "x-aspnetmvc-version"]:
+        if h in hdrs:
+            vulns.append(("MEDIUM", f"Version Disclosed: {h}",
+                f"{h}: {hdrs[h]}",
+                f"Eliminar header {h} de respuestas."))
+
+    # --- Referrer-Policy ---
+    rp = hdrs.get("referrer-policy", "")
+    if not rp:
+        vulns.append(("LOW", "No Referrer-Policy Header",
+            "Sin Referrer-Policy. URLs completas pueden filtrarse a sitios externos.",
+            "Implementar Referrer-Policy: strict-origin-when-cross-origin."))
+    elif rp.lower() == "unsafe-url":
+        vulns.append(("MEDIUM", "Referrer-Policy: unsafe-url",
+            "Referrer-Policy unsafe-url envia URL completa incluyendo paths y params.",
+            "Cambiar a strict-origin-when-cross-origin o no-referrer."))
+
+    # --- Technology-Specific Checks ---
+    techs = results.get("technologies", [])
+    tech_str = " ".join([t[1].lower() for t in techs]) if techs else ""
+    if "php" in tech_str:
+        expose = hdrs.get("x-powered-by", "")
+        if "php" in expose.lower():
+            vulns.append(("LOW", "PHP Version Exposed via X-Powered-By",
+                f"PHP version visible: {expose}",
+                "Deshabilitar expose_php en php.ini."))
+    if "wordpress" in tech_str:
+        if html and "/wp-json/" in html:
+            vulns.append(("MEDIUM", "WordPress REST API Exposed",
+                "WP REST API (/wp-json/) accesible. Enumerar usuarios y datos.",
+                "Restringir acceso a WP REST API con autenticacion."))
+        if html and "wp-login.php" in html:
+            vulns.append(("LOW", "WordPress Login Page Exposed",
+                "wp-login.php visible. Target para brute force.",
+                "Cambiar URL de login con plugin o .htaccess."))
+    if "drupal" in tech_str:
+        if html and "Drupal.settings" in html:
+            vulns.append(("MEDIUM", "Drupal Settings Exposed in HTML",
+                "Drupal.settings visible en HTML. Puede revelar paths y config.",
+                "Minimizar info en Drupal.settings para produccion."))
+
+    # --- DNS Additional ---
+    dns_data = results.get("dns", {})
+    if dns_data:
+        txt_records = dns_data.get("TXT", [])
+        for txt in txt_records:
+            if isinstance(txt, str):
+                if "v=spf1" not in txt and "google-site-verification" in txt.lower():
+                    pass  # Normal
+                if "api" in txt.lower() or "key" in txt.lower() or "secret" in txt.lower():
+                    vulns.append(("MEDIUM", "Sensitive Information in DNS TXT Record",
+                        f"TXT record contiene info potencialmente sensible: {txt[:60]}",
+                        "Revisar TXT records y eliminar info sensible."))
+                    break
+        mx_records = dns_data.get("MX", [])
+        if mx_records:
+            mx_str = " ".join([str(m) for m in mx_records]).lower()
+            if "google" in mx_str or "gmail" in mx_str:
+                pass  # Info only
+            if "localhost" in mx_str or "127.0.0.1" in mx_str:
+                vulns.append(("HIGH", "MX Record Points to Localhost",
+                    "MX record apunta a localhost. Correos no se entregan.",
+                    "Corregir MX record a servidor de correo valido."))
+
+    # --- Deprecated/Insecure TLS ---
+    ssl_data = results.get("ssl", {})
+    if ssl_data:
+        protocol = ssl_data.get("protocol", "")
+        if "TLSv1.0" in str(protocol) or "TLSv1 " in str(protocol):
+            vulns.append(("HIGH", "TLS 1.0 Supported (Deprecated)",
+                "TLS 1.0 activo. Vulnerable a BEAST, POODLE y otros ataques.",
+                "Deshabilitar TLS 1.0. Usar TLS 1.2+ como minimo."))
+        if "TLSv1.1" in str(protocol):
+            vulns.append(("MEDIUM", "TLS 1.1 Supported (Deprecated)",
+                "TLS 1.1 activo. Deprecated por todos los browsers principales.",
+                "Deshabilitar TLS 1.1. Usar TLS 1.2+ como minimo."))
+        cipher = ssl_data.get("cipher", "")
+        if cipher:
+            cipher_str = str(cipher).upper()
+            if "RC4" in cipher_str:
+                vulns.append(("HIGH", "RC4 Cipher in Use",
+                    "Cipher RC4 activo. Criptograficamente debil.",
+                    "Deshabilitar RC4 y usar ciphers modernos (AES-GCM)."))
+            if "DES" in cipher_str and "3DES" not in cipher_str:
+                vulns.append(("HIGH", "DES Cipher in Use",
+                    "Cipher DES activo. Clave de 56 bits, trivial de romper.",
+                    "Deshabilitar DES. Usar AES-128 o AES-256."))
+            if "3DES" in cipher_str:
+                vulns.append(("MEDIUM", "3DES Cipher in Use (Sweet32)",
+                    "Cipher 3DES activo. Vulnerable a Sweet32 attack.",
+                    "Deshabilitar 3DES. Usar AES-GCM."))
+            if "NULL" in cipher_str:
+                vulns.append(("CRITICAL", "NULL Cipher Negotiated",
+                    "Cipher NULL: sin cifrado. Trafico en texto plano.",
+                    "Deshabilitar NULL cipher inmediatamente."))
+            if "EXPORT" in cipher_str:
+                vulns.append(("CRITICAL", "EXPORT Cipher Supported",
+                    "Cipher EXPORT con claves debiles (40-56 bits). Vulnerable a FREAK.",
+                    "Deshabilitar ciphers EXPORT."))
+
+    # --- HSTS Preload ---
+    sts = hdrs.get("strict-transport-security", "")
+    if sts:
+        if "preload" not in sts.lower():
+            vulns.append(("LOW", "HSTS Without Preload Directive",
+                "HSTS sin preload. Primera visita sigue vulnerable a downgrade.",
+                "Agregar preload a HSTS y registrar en hstspreload.org."))
+        if "includesubdomains" not in sts.lower().replace(" ", ""):
+            vulns.append(("LOW", "HSTS Without includeSubDomains",
+                "HSTS no cubre subdominios. Subdominios vulnerables a downgrade.",
+                "Agregar includeSubDomains a HSTS header."))
+        import re as _re2
+        ma = _re2.search(r'max-age=(\d+)', sts)
+        if ma and int(ma.group(1)) < 31536000:
+            vulns.append(("LOW", "HSTS max-age Less Than 1 Year",
+                f"HSTS max-age={ma.group(1)}. Recomendado minimo 31536000 (1 año).",
+                "Incrementar HSTS max-age a 31536000 o mas."))
+
+    # --- Cache-Control Security ---
+    cc = hdrs.get("cache-control", "")
+    if not cc:
+        vulns.append(("LOW", "No Cache-Control Header",
+            "Sin Cache-Control. Respuestas pueden cachearse con datos sensibles.",
+            "Implementar Cache-Control: no-store para paginas con datos sensibles."))
+    elif "public" in cc.lower() and "no-store" not in cc.lower():
+        vulns.append(("LOW", "Cache-Control: public Without no-store",
+            "Cache-Control permite cache publico. Datos pueden persistir en proxies.",
+            "Usar Cache-Control: no-store, private para datos sensibles."))
+
+    # --- Expect-CT ---
+    ect = hdrs.get("expect-ct", "")
+    if ect and "enforce" not in ect.lower():
+        vulns.append(("INFO", "Expect-CT Without Enforce",
+            "Expect-CT presente sin enforce. Solo reporta, no bloquea.",
+            "Agregar enforce a Expect-CT para bloquear certificados no CT-logged."))
 
     # === Print Results ===
     if not vulns:
@@ -2457,6 +4206,133 @@ def generate_report(target, results, output_dir):
                 f.write(f"  [!] {i}\n")
             f.write("\n")
 
+        # Open Redirect
+        open_redir = results.get("open_redirect", [])
+        if open_redir:
+            f.write("OPEN REDIRECT:\n")
+            for r in open_redir:
+                f.write(f"  [{r['type']}] {r.get('url', r.get('endpoint', r.get('field', r.get('content', ''))))[:100]}\n")
+            f.write("\n")
+
+        # JSONP
+        jsonp = results.get("jsonp", [])
+        if jsonp:
+            f.write("JSONP ENDPOINTS:\n")
+            for j in jsonp:
+                f.write(f"  [{j['type']}] {j.get('url', j.get('endpoint', j.get('param', '')))[:100]}\n")
+            f.write("\n")
+
+        # Host Header
+        host_hdr = results.get("host_header", [])
+        if host_hdr:
+            f.write("HOST HEADER INJECTION:\n")
+            for h in host_hdr:
+                f.write(f"  [{h['test']}] Host: {h['host']} → reflected in {h['reflected_in']}\n")
+            f.write("\n")
+
+        # Cache Poisoning
+        cache = results.get("cache_poisoning", [])
+        if cache:
+            f.write("CACHE POISONING:\n")
+            for c in cache:
+                if c.get("type") == "cache_headers":
+                    for k, v in c.get("headers", {}).items():
+                        f.write(f"  {k}: {v}\n")
+                elif c.get("type") == "unkeyed_header_reflected":
+                    f.write(f"  [!] Unkeyed header reflected: {c['header']}\n")
+                elif c.get("type") == "vary_missing_host":
+                    f.write(f"  [!] Vary missing Host\n")
+            f.write("\n")
+
+        # GraphQL
+        graphql = results.get("graphql", [])
+        if graphql:
+            f.write("GRAPHQL:\n")
+            for g in graphql:
+                f.write(f"  [{g['type']}] {g['endpoint']}")
+                if g.get("types_count"):
+                    f.write(f" ({g['types_count']} types)")
+                f.write("\n")
+                if g.get("types"):
+                    for t in g["types"][:10]:
+                        f.write(f"    - {t}\n")
+            f.write("\n")
+
+        # JWT
+        jwt_data = results.get("jwt", [])
+        if jwt_data:
+            f.write("JWT TOKENS:\n")
+            for j in jwt_data:
+                f.write(f"  [{j.get('location', 'N/A')}] {j.get('token', j.get('issue', ''))}\n")
+            f.write("\n")
+
+        # CRLF
+        crlf = results.get("crlf", [])
+        if crlf:
+            f.write("CRLF INJECTION:\n")
+            for c in crlf:
+                f.write(f"  [{c['type']}] {c['payload']}\n")
+            f.write("\n")
+
+        # API Keys Deep
+        api_keys = results.get("api_keys_deep", [])
+        if api_keys:
+            f.write("API KEYS / SECRETS:\n")
+            for k in api_keys:
+                f.write(f"  [{k['type']}] {k['masked']}\n")
+            f.write("\n")
+
+        # Rate Limiting
+        rate = results.get("rate_limiting", {})
+        if rate:
+            f.write("RATE LIMITING:\n")
+            f.write(f"  Rate limited: {rate.get('rate_limited', 'Unknown')}\n")
+            if rate.get("requests_before_limit"):
+                f.write(f"  Requests before limit: {rate['requests_before_limit']}\n")
+            for rh in rate.get("rate_headers", []):
+                f.write(f"  {rh['header']}: {rh['value']}\n")
+            f.write("\n")
+
+        # Default Pages
+        defaults = results.get("default_pages", [])
+        if defaults:
+            f.write("DEFAULT / INSTALL PAGES:\n")
+            for d in defaults:
+                f.write(f"  [{d['service']}] {d['path']}\n")
+            f.write("\n")
+
+        # Error Disclosure
+        errors = results.get("error_disclosure", [])
+        if errors:
+            f.write("ERROR PAGE DISCLOSURE:\n")
+            for e in errors:
+                f.write(f"  [{e['category']}] {e['match'][:100]}\n")
+            f.write("\n")
+
+        # Smuggling
+        smuggling = results.get("smuggling", [])
+        if smuggling:
+            f.write("HTTP REQUEST SMUGGLING:\n")
+            for s in smuggling:
+                f.write(f"  [{s['type']}] {s.get('indicators', s.get('version', ''))}\n")
+            f.write("\n")
+
+        # SSRF
+        ssrf = results.get("ssrf_indicators", [])
+        if ssrf:
+            f.write("SSRF INDICATORS:\n")
+            for s in ssrf:
+                f.write(f"  [{s['type']}] {s.get('endpoint', s.get('param', ''))}\n")
+            f.write("\n")
+
+        # Broken Links
+        broken = results.get("broken_links", [])
+        if broken:
+            f.write("BROKEN LINK HIJACKING:\n")
+            for b in broken:
+                f.write(f"  [{b['type']}] {b['domain']}\n")
+            f.write("\n")
+
         # Vulnerabilities
         vulns_data = results.get("vulnerabilities", [])
         if vulns_data:
@@ -2524,6 +4400,20 @@ Modulos disponibles:
   favicon    - Favicon Hash Fingerprinting
   sectxt     - Security.txt Parser
   email      - Email Security (SPF/DMARC Deep)
+  openredir  - Open Redirect Detection
+  jsonp      - JSONP Callback Hijacking
+  hosthdr    - Host Header Injection
+  cache      - Cache Poisoning Indicators
+  graphql    - GraphQL Introspection Deep
+  jwt        - JWT Token Detection & Analysis
+  crlf       - CRLF Injection Check
+  apikeys    - API Key & Secret Deep Scan (40+ patterns)
+  ratelimit  - Rate Limiting Check
+  defaults   - Default / Install Pages Detection
+  errors     - Error Page Information Disclosure
+  smuggling  - HTTP Request Smuggling Indicators
+  ssrf       - SSRF Indicator Detection
+  brokenlink - Broken Link Hijacking
   all        - Todos los modulos (default)
         """
     )
@@ -2659,6 +4549,48 @@ Modulos disponibles:
 
     if all_modules or "email" in selected:
         mod_email_security(results)
+
+    if all_modules or "openredir" in selected:
+        mod_open_redirect(session, base_url, html, results)
+
+    if all_modules or "jsonp" in selected:
+        mod_jsonp(session, base_url, html, results)
+
+    if all_modules or "hosthdr" in selected:
+        mod_host_header(session, target, results)
+
+    if all_modules or "cache" in selected:
+        mod_cache_poisoning(session, target, results)
+
+    if all_modules or "graphql" in selected:
+        mod_graphql(session, base_url, results)
+
+    if all_modules or "jwt" in selected:
+        mod_jwt_analysis(session, target, results)
+
+    if all_modules or "crlf" in selected:
+        mod_crlf(session, target, results)
+
+    if all_modules or "apikeys" in selected:
+        mod_api_keys_deep(session, target, html, results)
+
+    if all_modules or "ratelimit" in selected:
+        mod_rate_limit(session, target, results)
+
+    if all_modules or "defaults" in selected:
+        mod_default_pages(session, base_url, results)
+
+    if all_modules or "errors" in selected:
+        mod_error_disclosure(session, base_url, results)
+
+    if all_modules or "smuggling" in selected:
+        mod_smuggling_indicators(session, target, results)
+
+    if all_modules or "ssrf" in selected:
+        mod_ssrf_indicators(session, target, html, results)
+
+    if all_modules or "brokenlink" in selected:
+        mod_broken_links(session, base_url, html, results)
 
     # Vulnerability assessment (siempre corre al final)
     mod_vuln_assessment(results)
