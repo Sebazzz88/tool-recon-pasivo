@@ -3,6 +3,5 @@ __pycache__/
 *.json
 *.txt
 !passive-recon.py
-!active-recon.py
 !README.md
 !.gitignore
