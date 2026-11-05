@@ -55,7 +55,7 @@ def banner():
  | |_) / _` / __/ __| \\ \\ / / _ \\ |_) / _ \\/ __/ _ \\| '_ \\
  |  __/ (_| \\__ \\__ \\ |\\ V /  __/  _ <  __/ (_| (_) | | | |
  |_|   \\__,_|___/___/_| \\_/ \\___|_| \\_\\___|\\___\\___/|_| |_|
-                                            {C.D}v2.0 by SR{C.X}
+                                            {C.D}v2.1{C.X}
 """)
 
 def log_info(msg):
@@ -276,6 +276,20 @@ def mod_dns(hostname, results):
         except Exception:
             pass
 
+    # DNSSEC: DNSKEY vive en el apex de la zona, no en subdominios como "www".
+    # Consultar el dominio registrable para una deteccion fiable (evita el
+    # falso positivo de "No DNSSEC" que antes disparaba en todos los dominios).
+    parts = hostname.split(".")
+    apex = ".".join(parts[-2:]) if len(parts) >= 2 else hostname
+    try:
+        dnskey = dns.resolver.resolve(apex, "DNSKEY")
+        if dnskey:
+            dns_results["DNSKEY"] = [str(r)[:60] for r in dnskey]
+            log_ok(f"DNSSEC activo (DNSKEY presente en {apex})")
+    except Exception:
+        # Sin DNSKEY o error — no se marca nada aqui; el assessment lo evalua.
+        pass
+
     results["dns"] = dns_results
 
     # Check for SPF, DMARC, DKIM hints
@@ -375,11 +389,9 @@ def mod_tech_fingerprint(session, url, html, results):
         "Django": [r"csrfmiddlewaretoken", r"__admin__"],
         "ASP.NET": [r"__VIEWSTATE", r"__EVENTVALIDATION", r"asp\.net"],
         "Keycloak": [r"keycloak\.js", r"/auth/realms/", r"/auth/admin/"],
-        "Spring": [r"spring", r"JSESSIONID"],
-        "Nginx": [r"nginx"],
-        "Apache": [r"apache"],
-        "Cloudflare": [r"cf-ray", r"cloudflare"],
-        "AWS": [r"x-amz-", r"AmazonS3", r"\.amazonaws\.com"],
+        "Spring": [r"JSESSIONID", r"org\.springframework"],
+        "Cloudflare": [r"cf-ray", r"challenge-platform"],
+        "AWS": [r"\.amazonaws\.com"],
         "Google Analytics": [r"google-analytics\.com", r"gtag", r"UA-\d+"],
         "Google Tag Manager": [r"googletagmanager\.com", r"GTM-"],
         "Hotjar": [r"hotjar\.com", r"hj\("],
@@ -809,15 +821,51 @@ def mod_sensitive_paths(session, base_url, results):
     found_paths = []
     log_info(f"Probando {len(paths)} rutas comunes...")
 
-    def check_path(path):
-        url = urljoin(base_url, path)
+    # --- Baseline / soft-404 detection ---
+    # Muchos sitios (SPAs, catch-all, redirects a login) responden 200/301/302
+    # a CUALQUIER ruta. Sin una linea base, eso marca las ~200 rutas como
+    # "encontradas" (falsos positivos masivos). Pedimos 2 rutas aleatorias
+    # inexistentes y, si responden como "exito", tratamos esos codigos como
+    # ruido y solo reportamos rutas cuyo tamano difiera del baseline.
+    def _probe(path):
         try:
-            r = session.head(url, timeout=5, allow_redirects=False)
-            if r.status_code in [200, 301, 302, 403]:
-                return (path, r.status_code, len(r.content) if r.content else 0)
+            return session.head(urljoin(base_url, path), timeout=5, allow_redirects=False)
         except Exception:
-            pass
-        return None
+            return None
+
+    baseline_statuses = {}   # status_code -> content-length tipico (o None)
+    for rnd in ["/zzz_nonexistent_%s_recon" % os.urandom(4).hex(),
+                "/404_baseline_%s.html" % os.urandom(4).hex()]:
+        rb = _probe(rnd)
+        if rb is not None and rb.status_code in (200, 301, 302, 403):
+            try:
+                clen = int(rb.headers.get("Content-Length", -1))
+            except (TypeError, ValueError):
+                clen = -1
+            baseline_statuses[rb.status_code] = clen
+
+    soft_codes = set(baseline_statuses.keys())
+    if soft_codes:
+        log_warn("Soft-404 detectado (el servidor responde %s a rutas inexistentes); "
+                 "filtrando resultados para reducir falsos positivos"
+                 % ", ".join(str(c) for c in sorted(soft_codes)))
+    results["sensitive_paths_softcodes"] = sorted(soft_codes)
+
+    def check_path(path):
+        r = _probe(path)
+        if r is None or r.status_code not in [200, 301, 302, 403]:
+            return None
+        try:
+            size = int(r.headers.get("Content-Length", -1))
+        except (TypeError, ValueError):
+            size = -1
+        # Si este codigo es el mismo que el baseline (soft-404), solo lo
+        # consideramos real cuando el tamano difiere claramente del baseline.
+        if r.status_code in baseline_statuses:
+            base_len = baseline_statuses[r.status_code]
+            if base_len < 0 or size < 0 or abs(size - base_len) <= 32:
+                return None
+        return (path, r.status_code, max(size, 0))
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(check_path, p): p for p in paths}
@@ -1331,24 +1379,22 @@ def mod_subdomain_takeover(session, subdomains, results):
         return
 
     # Services vulnerable to subdomain takeover
+    # Firmas ESPECIFICAS por servicio. Se evitan cadenas genericas como
+    # "404 Not Found" o "The requested URL was not found", que aparecen en
+    # paginas 404 normales y causaban falsos positivos de takeover.
     takeover_signatures = {
-        "GitHub Pages": ["There isn't a GitHub Pages site here", "For root URLs"],
-        "Heroku": ["No such app", "herokucdn.com/error-pages", "no-such-app"],
+        "GitHub Pages": ["There isn't a GitHub Pages site here"],
+        "Heroku": ["herokucdn.com/error-pages", "No such app"],
         "AWS S3": ["NoSuchBucket", "The specified bucket does not exist"],
-        "AWS Elastic Beanstalk": ["NXDOMAIN"],
         "Shopify": ["Sorry, this shop is currently unavailable"],
         "Tumblr": ["Whatever you were looking for doesn't currently exist"],
-        "WordPress.com": ["Do you want to register"],
-        "Pantheon": ["404 error unknown site"],
         "Fastly": ["Fastly error: unknown domain"],
         "Zendesk": ["Help Center Closed"],
         "Bitbucket": ["Repository not found"],
         "Ghost": ["The thing you were looking for is no longer here"],
         "Surge.sh": ["project not found"],
-        "Fly.io": ["404 Not Found"],
-        "Netlify": ["Not Found - Request ID"],
         "Cargo Collective": ["If you're moving your domain away"],
-        "Unbounce": ["The requested URL was not found"],
+        "Pantheon": ["The gods are wise, but do not know of the site which you seek"],
     }
 
     takeover_candidates = []
@@ -1356,6 +1402,35 @@ def mod_subdomain_takeover(session, subdomains, results):
     max_check = min(len(subdomains), 50)
 
     log_info(f"Verificando {max_check} subdominios...")
+
+    # Proveedores donde un CNAME colgante (CNAME que resuelve a uno de estos
+    # pero el recurso no existe) es realmente reclamable. Un subdominio que
+    # simplemente no resuelve NO es un takeover por si mismo.
+    takeover_cname_providers = (
+        "github.io", "herokudns.com", "herokuapp.com", "herokussl.com",
+        "s3.amazonaws.com", "cloudfront.net", "myshopify.com", "fastly.net",
+        "zendesk.com", "bitbucket.io", "ghost.io", "surge.sh",
+        "cargocollective.com", "pantheonsite.io", "wpengine.com",
+        "unbouncepages.com", "readthedocs.io", "netlify.app", "azurewebsites.net",
+    )
+
+    def _dangling_cname(sub):
+        # Devuelve el provider si el subdominio tiene un CNAME a un proveedor
+        # reclamable pero el destino no resuelve (dangling).
+        if not HAS_DNS:
+            return None
+        try:
+            answers = dns.resolver.resolve(sub, "CNAME")
+        except Exception:
+            return None
+        for rdata in answers:
+            target = str(rdata.target).rstrip(".").lower()
+            if any(p in target for p in takeover_cname_providers):
+                try:
+                    socket.getaddrinfo(target, None)
+                except socket.gaierror:
+                    return target  # CNAME a proveedor y no resuelve → dangling
+        return None
 
     def check_sub(sub):
         for scheme in ["https", "http"]:
@@ -1367,11 +1442,12 @@ def mod_subdomain_takeover(session, subdomains, results):
                         if sig.lower() in body.lower():
                             return (sub, service, sig)
             except requests.exceptions.ConnectionError:
-                # NXDOMAIN or connection refused — potential takeover
-                try:
-                    socket.getaddrinfo(sub, None)
-                except socket.gaierror:
-                    return (sub, "NXDOMAIN (dangling CNAME)", "DNS no resuelve")
+                # Solo es candidato si hay un CNAME colgante a un proveedor
+                # reclamable, no por el mero hecho de no resolver.
+                target = _dangling_cname(sub)
+                if target:
+                    return (sub, "Dangling CNAME", target)
+                break
             except Exception:
                 continue
         return None
@@ -1803,13 +1879,29 @@ def mod_open_redirect(session, base_url, html, results):
     redirect_findings = []
     parsed = urlparse(base_url)
 
+    # Para escanear LINKS usamos solo nombres especificos de redireccion.
+    # Nombres genericos (page, view, to, r, u, n, data, site, host, path...)
+    # aparecen en casi cualquier URL y generan falsos positivos; se reservan
+    # unicamente para las pruebas activas de endpoints mas abajo.
+    link_redirect_params = [
+        "redirect", "redirect_url", "redirect_uri", "redirecturl", "next",
+        "nexturl", "returnurl", "return_to", "return_url", "rurl", "redir",
+        "redirect_to", "login_url", "image_url", "goto", "checkout_url",
+        "return_path", "forward", "destination", "continue",
+    ]
+
     # Check for redirect parameters in page links
     link_pattern = re.findall(r'href=["\']([^"\']*)["\']', html)
     for link in link_pattern:
-        for param in redirect_params:
-            if f"{param}=" in link.lower():
-                redirect_findings.append({"type": "link_param", "url": link[:200], "param": param})
-                break
+        low = link.lower()
+        for param in link_redirect_params:
+            # exigir que el valor parezca una URL/externo, no solo que exista el param
+            m = re.search(r'[?&]' + re.escape(param) + r'=([^&]+)', low)
+            if m:
+                val = m.group(1)
+                if val.startswith(("http", "%2f%2f", "//")) or "%3a%2f%2f" in val or "://" in val:
+                    redirect_findings.append({"type": "link_param", "url": link[:200], "param": param})
+                    break
 
     # Check forms for redirect fields
     form_inputs = re.findall(r'<input[^>]*name=["\']([^"\']*)["\'][^>]*>', html, re.I)
@@ -1886,8 +1978,12 @@ def mod_jsonp(session, base_url, html, results):
         try:
             r = session.get(f"{base_url}{endpoint}", timeout=8)
             if r.status_code == 200:
-                body = r.text[:500]
-                if re.match(r'\s*test\s*\(', body) or "test(" in body:
+                body = r.text[:500].lstrip().lstrip("/*").lstrip()
+                ctype = r.headers.get("Content-Type", "").lower()
+                # JSONP real: el cuerpo EMPIEZA con la invocacion del callback
+                # (p.ej. "test({...})") y no es HTML. Que aparezca "test(" en
+                # medio de un JS cualquiera no es JSONP.
+                if re.match(r'^(?:typeof\s+\w+.*?)?test\s*\(', body) and "html" not in ctype:
                     jsonp_findings.append({"type": "confirmed", "endpoint": endpoint})
                     log_fail(f"JSONP activo: {endpoint}")
         except Exception:
@@ -2180,12 +2276,12 @@ def mod_crlf(session, url, results):
         test_url = f"{url}/?redirect={payload}"
         try:
             r = session.get(test_url, timeout=8, allow_redirects=False)
-            if "X-Injected" in str(r.headers):
+            # Solo contamos inyeccion REAL en headers de respuesta. La mera
+            # reflexion del string en el body no es CRLF (es solo reflexion del
+            # parametro) y generaba falsos positivos.
+            if "x-injected" in {k.lower(): v for k, v in r.headers.items()}:
                 findings.append({"type": "header_injection", "payload": payload})
                 log_fail(f"CRLF injection en headers: {payload}")
-            elif "X-Injected" in r.text[:1000]:
-                findings.append({"type": "body_injection", "payload": payload})
-                log_warn(f"CRLF reflejado en body: {payload}")
         except Exception:
             continue
 
@@ -2210,30 +2306,27 @@ def mod_api_keys_deep(session, url, html, results):
         "Twilio API Key": r'SK[a-f0-9]{32}',
         "Twilio Account SID": r'AC[a-f0-9]{32}',
         "SendGrid API Key": r'SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}',
-        "Mailgun API Key": r'key-[a-zA-Z0-9]{32}',
-        "Slack Token": r'xox[bpas]-[a-zA-Z0-9-]+',
+        "Mailgun API Key": r'key-[a-f0-9]{32}',
+        "Slack Token": r'xox[bpas]-[0-9]{10,}-[a-zA-Z0-9-]{20,}',
         "Slack Webhook": r'https://hooks\.slack\.com/services/T[a-zA-Z0-9]+/B[a-zA-Z0-9]+/[a-zA-Z0-9]+',
         "GitHub Token": r'gh[pousr]_[a-zA-Z0-9]{36,}',
         "GitHub OAuth": r'gho_[a-zA-Z0-9]{36}',
         "Google API Key": r'AIza[0-9A-Za-z_-]{35}',
         "Google OAuth ID": r'[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com',
         "Firebase Key": r'AAAA[a-zA-Z0-9_-]{7}:[a-zA-Z0-9_-]{140}',
-        "Heroku API Key": r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
         "DigitalOcean Token": r'dop_v1_[a-f0-9]{64}',
         "NPM Token": r'npm_[a-zA-Z0-9]{36}',
         "Discord Token": r'[MN][A-Za-z0-9]{23,}\.[\w-]{6}\.[\w-]{27,}',
         "Discord Webhook": r'https://discord(?:app)?\.com/api/webhooks/\d+/[\w-]+',
-        "Telegram Bot Token": r'\d{8,10}:[a-zA-Z0-9_-]{35}',
+        "Telegram Bot Token": r'\b\d{8,10}:AA[a-zA-Z0-9_-]{32,33}\b',
         "Square Access Token": r'sq0atp-[a-zA-Z0-9_-]{22}',
         "Square OAuth Secret": r'sq0csp-[a-zA-Z0-9_-]{43}',
-        "PayPal Bearer": r'A21AA[a-zA-Z0-9_-]+',
         "Shopify Token": r'shpat_[a-fA-F0-9]{32}',
         "Shopify Secret": r'shpss_[a-fA-F0-9]{32}',
         "Shopify URL": r'[a-z0-9-]+\.myshopify\.com/admin/api/[0-9-]+',
-        "Mapbox Token": r'pk\.[a-zA-Z0-9]{60,}',
-        "Algolia API Key": r'[a-f0-9]{32}',
+        "Mapbox Token": r'pk\.eyJ[a-zA-Z0-9_-]{50,}',
         "Sentry DSN": r'https://[a-f0-9]{32}@[a-z0-9]+\.ingest\.sentry\.io/\d+',
-        "Datadog API Key": r'dd[a-f0-9]{40}',
+        "Datadog API Key": r'\bdd[a-f0-9]{38}\b',
         "Private Key": r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----',
         "PGP Private Block": r'-----BEGIN PGP PRIVATE KEY BLOCK-----',
         "Generic Secret": r'(?:secret|password|passwd|pwd|token|api_key|apikey|api-key|access_token|auth_token|credentials)["\s:=]+["\']([a-zA-Z0-9_/+=-]{16,})["\']',
@@ -2432,24 +2525,35 @@ def mod_error_disclosure(session, base_url, results):
         "Debug Info": [r"(?:DEBUG\s*=\s*True|DJANGO_SETTINGS_MODULE|APP_DEBUG)",
                        r"(?:display_errors|error_reporting)"],
         "Internal IP": [r"(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})"],
-        "Email in Error": [r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"],
-        "Technology Stack": [r"(?:X-Powered-By|X-AspNet-Version|X-AspNetMvc-Version)"],
     }
+
+    # Indicadores de que la respuesta es realmente un error verboso y no una
+    # pagina normal (que podria contener rutas/emails legitimos en el footer).
+    error_context = re.compile(
+        r"(?:exception|traceback|stack\s*trace|fatal error|warning:|notice:|"
+        r"sql syntax|syntaxerror|uncaught|\.php on line|\.py\", line|at line \d+|"
+        r"debug|error in|internal server error)", re.I)
 
     for trigger_url in error_triggers:
         try:
             r = session.get(trigger_url, timeout=8)
             body = r.text[:5000]
 
-            for category, patterns in info_patterns.items():
-                for pattern in patterns:
-                    matches = re.findall(pattern, body, re.I)
-                    if matches:
-                        for m in matches[:2]:
-                            finding = {"category": category, "trigger": trigger_url.replace(base_url, ""), "match": str(m)[:100]}
-                            if finding not in findings:
-                                findings.append(finding)
-                                log_warn(f"{category}: {str(m)[:80]}")
+            # Solo analizar patrones de disclosure si la respuesta realmente
+            # parece un error verboso. Una pagina 404 "bonita" con footer
+            # (emails, rutas de CDN) no debe considerarse info disclosure.
+            looks_like_error = bool(error_context.search(body)) or r.status_code >= 500
+
+            if looks_like_error:
+                for category, patterns in info_patterns.items():
+                    for pattern in patterns:
+                        matches = re.findall(pattern, body, re.I)
+                        if matches:
+                            for m in matches[:2]:
+                                finding = {"category": category, "trigger": trigger_url.replace(base_url, ""), "match": str(m)[:100]}
+                                if finding not in findings:
+                                    findings.append(finding)
+                                    log_warn(f"{category}: {str(m)[:80]}")
 
             # Check for verbose error headers
             for header in ["X-Debug-Token", "X-Debug-Token-Link"]:
@@ -2546,8 +2650,11 @@ def mod_ssrf_indicators(session, url, html, results):
             if f"{param}=" in found_url.lower():
                 val_match = re.findall(f'{param}=([^&"\']+)', found_url, re.I)
                 if val_match:
-                    val = val_match[0]
-                    if val.startswith(("http", "//", "/")) or "." in val:
+                    val = val_match[0].lower()
+                    # Solo si el valor parece una URL absoluta (http://, //host,
+                    # o URL-encoded), no cualquier valor con un punto (p.ej. .png)
+                    if val.startswith(("http://", "https://", "//")) or \
+                       "%2f%2f" in val or "%3a%2f%2f" in val or "://" in val:
                         findings.append({"type": "url_param", "param": param, "url": found_url[:200]})
                         log_warn(f"Parametro SSRF potencial: {param}={val[:60]}")
                         break
@@ -2645,6 +2752,12 @@ def mod_vuln_assessment(results):
 
     vulns = []  # (severity, title, description, remediation)
 
+    # Headers se usan en varias secciones; normalizar a minusculas para lookups
+    # consistentes (HTTP headers son case-insensitive). Debe definirse ANTES de
+    # su primer uso para evitar UnboundLocalError.
+    headers = results.get("headers", {})
+    headers_lc = {k.lower(): v for k, v in headers.items()} if isinstance(headers, dict) else {}
+
     # --- Security Headers ---
     sec = results.get("security_headers", {})
     missing = sec.get("missing", [])
@@ -2695,13 +2808,13 @@ def mod_vuln_assessment(results):
             "Agregar Cross-Origin-Resource-Policy: same-origin."))
 
     # Check dangerous headers present
-    x_xss = sec.get("x_xss_protection", "")
+    x_xss = headers_lc.get("x-xss-protection", "")
     if x_xss and "1; mode=block" not in str(x_xss):
         vulns.append(("LOW", "X-XSS-Protection Misconfigured",
             f"X-XSS-Protection configurado como: {x_xss}. Puede desactivar filtros del navegador.",
             "Usar X-XSS-Protection: 1; mode=block o removerlo y depender de CSP."))
 
-    cache_control = headers.get("Cache-Control", "")
+    cache_control = headers_lc.get("cache-control", "")
     if not cache_control:
         vulns.append(("LOW", "Missing Cache-Control Header",
             "Sin Cache-Control, paginas sensibles pueden cachearse en proxies/navegadores.",
@@ -2710,12 +2823,6 @@ def mod_vuln_assessment(results):
         vulns.append(("MEDIUM", "Cache-Control Allows Public Caching",
             f"Cache-Control: {cache_control} — paginas sensibles pueden ser cacheadas.",
             "Usar no-store para contenido sensible."))
-
-    pragma = headers.get("Pragma", "")
-    if "no-cache" not in pragma and not cache_control:
-        vulns.append(("INFO", "Missing Pragma: no-cache",
-            "Sin Pragma para compatibilidad con HTTP/1.0.",
-            "Agregar Pragma: no-cache junto con Cache-Control."))
 
     if len(missing) >= 7:
         vulns.append(("HIGH", "Severe Lack of Security Headers",
@@ -2799,9 +2906,8 @@ def mod_vuln_assessment(results):
             "Agregar flag HttpOnly a cookies de sesion."))
 
     # --- Server Info Disclosure ---
-    headers = results.get("headers", {})
-    server = headers.get("Server", "")
-    powered = headers.get("X-Powered-By", "")
+    server = headers_lc.get("server", "")
+    powered = headers_lc.get("x-powered-by", "")
 
     if server and server.lower() not in ["", "no revelado"]:
         # Check if version is disclosed
@@ -3013,13 +3119,13 @@ def mod_vuln_assessment(results):
             "Solo un nameserver. Unico punto de fallo para DNS.",
             "Agregar al menos un nameserver secundario."))
 
-    # Check for DNSSEC
-    has_dnssec = any("DNSKEY" in str(dns_data.get(k, [])) or "RRSIG" in str(dns_data.get(k, []))
-                     for k in dns_data)
+    # Check for DNSSEC (mod_dns consulta DNSKEY en el apex y lo guarda si existe)
+    has_dnssec = bool(dns_data.get("DNSKEY"))
     if dns_data and not has_dnssec:
-        vulns.append(("LOW", "No DNSSEC Detected",
-            "Sin DNSSEC. DNS spoofing/cache poisoning posible.",
-            "Implementar DNSSEC para autenticar respuestas DNS."))
+        vulns.append(("INFO", "No DNSSEC Detected",
+            "No se detecto DNSKEY en el apex. DNSSEC podria no estar activo "
+            "(o no fue posible consultarlo). Sin DNSSEC el DNS es mas facil de spoofear.",
+            "Evaluar la implementacion de DNSSEC para autenticar respuestas DNS."))
 
     # Check for CNAME on apex
     cname_records = dns_data.get("CNAME", [])
@@ -3159,10 +3265,10 @@ def mod_vuln_assessment(results):
                 "Activar domain lock y 2FA en cuenta del registrar."))
 
     # --- Favicon ---
-    fav_data = results.get("favicon_hash", {})
-    if fav_data and fav_data.get("known_tech"):
-        vulns.append(("INFO", f"Technology via Favicon: {fav_data['known_tech']}",
-            f"Favicon hash identifica: {fav_data['known_tech']}.",
+    fav_data = results.get("favicon", {})
+    if fav_data and fav_data.get("known_match"):
+        vulns.append(("INFO", f"Technology via Favicon: {fav_data['known_match']}",
+            f"Favicon hash identifica: {fav_data['known_match']}.",
             "Cambiar favicon default para evitar fingerprinting."))
 
     # --- CORS ---
@@ -3428,10 +3534,6 @@ def mod_vuln_assessment(results):
             vulns.append(("HIGH", "CRLF Injection in Headers",
                 f"Inyeccion CRLF confirmada: {cr['payload']}.",
                 "Sanitizar caracteres CR/LF en input del usuario."))
-        elif cr.get("type") == "body_injection":
-            vulns.append(("MEDIUM", "CRLF Reflected in Body",
-                f"CRLF reflejado en body: {cr['payload']}.",
-                "Sanitizar input contra CRLF."))
 
     # --- API Keys Deep ---
     api_keys = results.get("api_keys_deep", [])
@@ -3467,9 +3569,11 @@ def mod_vuln_assessment(results):
     # --- Rate Limiting ---
     rate = results.get("rate_limiting", {})
     if rate.get("rate_limited") is False:
-        vulns.append(("MEDIUM", "No Rate Limiting Detected",
-            "No se detecto rate limiting tras 15 requests rapidas.",
-            "Implementar rate limiting para prevenir brute force y DoS."))
+        vulns.append(("LOW", "No Rate Limiting Observed on Landing Page",
+            "No se observo rate limiting (HTTP 429) tras 15 requests a la pagina "
+            "principal. Nota: endpoints estaticos no suelen limitar; verificar "
+            "manualmente login/APIs antes de concluir que no hay rate limiting.",
+            "Implementar rate limiting en endpoints de autenticacion y APIs."))
     if rate.get("rate_limited") and rate.get("requests_before_limit", 0) > 10:
         vulns.append(("LOW", "Weak Rate Limiting",
             f"Rate limiting activo pero permisivo: {rate['requests_before_limit']} requests antes de limitar.",
@@ -3695,49 +3799,24 @@ def mod_vuln_assessment(results):
                 break
 
     # --- Permissions-Policy / Feature-Policy ---
-    hdrs = results.get("headers", {})
+    hdrs = headers_lc
     pp = hdrs.get("permissions-policy", hdrs.get("feature-policy", ""))
-    if pp:
-        sensitive_features = ["camera", "microphone", "geolocation", "payment", "usb", "bluetooth", "midi"]
-        for feat in sensitive_features:
-            if feat not in pp.lower():
-                vulns.append(("LOW", f"Permissions-Policy Missing: {feat}",
-                    f"Feature '{feat}' no restringida en Permissions-Policy.",
-                    f"Agregar {feat}=() a Permissions-Policy para deshabilitar."))
-    else:
+    if not pp:
         vulns.append(("LOW", "No Permissions-Policy Header",
             "Sin Permissions-Policy header. Features del navegador no restringidas.",
             "Implementar Permissions-Policy para restringir camera, mic, geolocation, payment."))
 
     # --- Email Security Advanced ---
+    # SPF/DMARC faltantes y +all/p=none/rua ya se cubren en las secciones
+    # "DNS" y "Email Security" de arriba. Aqui solo agregamos el caso ~all
+    # (softfail) que no se reporta en otro lugar, para no duplicar hallazgos.
     email_sec = results.get("email_security", {})
     if email_sec:
         spf = email_sec.get("spf", "")
-        dmarc = email_sec.get("dmarc", "")
-        if spf and "+all" in spf:
-            vulns.append(("CRITICAL", "SPF Record Allows All Senders (+all)",
-                "SPF con +all permite que cualquier IP envie correo como este dominio.",
-                "Cambiar +all a -all o ~all en registro SPF."))
         if spf and "~all" in spf:
             vulns.append(("MEDIUM", "SPF Softfail (~all) Instead of Hardfail",
-                "SPF usa ~all (softfail). Correos falsificados pueden llegar.",
+                "SPF usa ~all (softfail). Correos falsificados pueden llegar como spam.",
                 "Cambiar ~all a -all para rechazar correos no autorizados."))
-        if dmarc and "p=none" in dmarc.lower():
-            vulns.append(("MEDIUM", "DMARC Policy Set to None",
-                "DMARC con p=none solo monitorea, no bloquea spoofing.",
-                "Cambiar p=none a p=quarantine o p=reject."))
-        if dmarc and "rua=" not in dmarc.lower():
-            vulns.append(("LOW", "DMARC Without Aggregate Reporting (rua)",
-                "DMARC sin rua= no recibe reportes de autenticacion.",
-                "Agregar rua=mailto:reports@domain a politica DMARC."))
-        if not email_sec.get("dmarc"):
-            vulns.append(("HIGH", "No DMARC Record",
-                "Sin registro DMARC. Email spoofing del dominio posible.",
-                "Implementar DMARC con politica quarantine o reject."))
-        if not email_sec.get("spf"):
-            vulns.append(("HIGH", "No SPF Record",
-                "Sin registro SPF. Cualquier servidor puede enviar correo como este dominio.",
-                "Implementar registro SPF con -all."))
 
     # --- Autocomplete on Sensitive Fields ---
     if html:
@@ -3820,20 +3899,14 @@ def mod_vuln_assessment(results):
             f"Server-Timing expone metricas internas: {st[:80]}",
             "Deshabilitar Server-Timing en produccion o limitar info."))
 
-    # --- X-Powered-By Variants ---
-    for h in ["x-aspnet-version", "x-aspnetmvc-version"]:
-        if h in hdrs:
-            vulns.append(("MEDIUM", f"Version Disclosed: {h}",
-                f"{h}: {hdrs[h]}",
-                f"Eliminar header {h} de respuestas."))
+    # (X-AspNet-Version / X-AspNetMvc-Version ya se evaluan en la seccion
+    #  de Server Info Disclosure de arriba.)
 
     # --- Referrer-Policy ---
+    # El caso "ausente" ya se reporta como "Missing Referrer-Policy" en la
+    # seccion de security headers; aqui solo el caso explicitamente inseguro.
     rp = hdrs.get("referrer-policy", "")
-    if not rp:
-        vulns.append(("LOW", "No Referrer-Policy Header",
-            "Sin Referrer-Policy. URLs completas pueden filtrarse a sitios externos.",
-            "Implementar Referrer-Policy: strict-origin-when-cross-origin."))
-    elif rp.lower() == "unsafe-url":
+    if rp and rp.lower() == "unsafe-url":
         vulns.append(("MEDIUM", "Referrer-Policy: unsafe-url",
             "Referrer-Policy unsafe-url envia URL completa incluyendo paths y params.",
             "Cambiar a strict-origin-when-cross-origin o no-referrer."))
@@ -3939,16 +4012,7 @@ def mod_vuln_assessment(results):
                 f"HSTS max-age={ma.group(1)}. Recomendado minimo 31536000 (1 año).",
                 "Incrementar HSTS max-age a 31536000 o mas."))
 
-    # --- Cache-Control Security ---
-    cc = hdrs.get("cache-control", "")
-    if not cc:
-        vulns.append(("LOW", "No Cache-Control Header",
-            "Sin Cache-Control. Respuestas pueden cachearse con datos sensibles.",
-            "Implementar Cache-Control: no-store para paginas con datos sensibles."))
-    elif "public" in cc.lower() and "no-store" not in cc.lower():
-        vulns.append(("LOW", "Cache-Control: public Without no-store",
-            "Cache-Control permite cache publico. Datos pueden persistir en proxies.",
-            "Usar Cache-Control: no-store, private para datos sensibles."))
+    # Cache-Control ya se evalua en la seccion de security headers de arriba.
 
     # --- Expect-CT ---
     ect = hdrs.get("expect-ct", "")
@@ -3963,8 +4027,17 @@ def mod_vuln_assessment(results):
         results["vulnerabilities"] = []
         return
 
-    # Sort by severity
+    # Deduplicar hallazgos identicos (por titulo) que pudieran venir de dos
+    # secciones distintas, conservando la mayor severidad de cada uno.
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    _by_title = {}
+    for v in vulns:
+        key = v[1].strip().lower()
+        if key not in _by_title or severity_order.get(v[0], 5) < severity_order.get(_by_title[key][0], 5):
+            _by_title[key] = v
+    vulns = list(_by_title.values())
+
+    # Sort by severity
     vulns.sort(key=lambda x: severity_order.get(x[0], 5))
 
     results["vulnerabilities"] = [
@@ -4467,6 +4540,10 @@ Modulos disponibles:
         html = r.text
     except Exception:
         log_warn("No se pudo obtener el HTML inicial")
+
+    # Guardar el HTML en results para que los checks basados en HTML
+    # (SRI, mixed content, forms, iframes, comentarios) del assessment funcionen.
+    results["html"] = html
 
     # Run modules
     if all_modules or "headers" in selected:
